@@ -1,0 +1,93 @@
+Screen { background: $background; }
+
+#info-bar { dock: top; height: 1; background: $panel; padding: 0 1; }
+#info-main { width: 1fr; color: $foreground; }
+#info-app  { width: auto; color: $label; }
+
+Footer { background: $panel; color: $subtext; }
+
+#split { height: 1fr; }
+#top { height: 40%; }
+#tree { width: 60%; height: 100%; background: $background; }
+#staging { width: 40%; height: 100%; background: $background; padding: 0 1; }
+#staging-header { height: 1; color: $accent; text-style: bold; }
+#staging-table { height: 1fr; background: $background; }
+#preview { height: 1fr; padding: 0 1; }
+#preview-header { color: $accent; text-style: bold; height: 1; }
+#preview-tabs { height: 1; width: 1fr; }
+.field-tab { width: auto; padding: 0 2; color: $subtext; }
+.field-tab.selected { width: auto; color: $accent; text-style: bold underline; }
+#preview-body { height: 1fr; }
+
+#divider { height: 1; color: $panel; background: $surface; }
+#divider:hover { color: $accent; }
+
+LegendScreen { align: center middle; }
+
+#legend-box {
+    width: auto;
+    max-width: 64;
+    height: auto;
+    padding: 1 2;
+    background: $panel;
+    border: round $primary;
+}
+#legend-box > Static { width: auto; }
+
+#legend-title   { text-style: bold; color: $primary; }
+#legend-sub     { text-style: bold; margin-top: 1; }
+.legend-ok      { color: $success; text-style: bold; }
+.legend-warn    { color: $warning; text-style: bold; }
+.legend-update  { color: $primary; }
+.legend-insert  { color: $success; }
+.legend-delete  { color: $error; }
+.legend-keys    { color: $subtext; margin-top: 1; }
+.legend-dismiss { color: $subtext; }
+
+SwitchConfirmScreen { align: center middle; }
+
+#confirm-box {
+    width: auto;
+    max-width: 64;
+    height: auto;
+    padding: 1 2;
+    background: $panel;
+    border: round $warning;
+}
+#confirm-box > Static { width: auto; }
+
+.confirm-title   { text-style: bold; color: $primary; }
+.confirm-warn    { color: $warning; text-style: bold; margin-top: 1; }
+.confirm-keys    { color: $subtext; margin-top: 1; }
+
+SetPickerScreen { align: center middle; }
+
+#picker-box {
+    width: 80;
+    max-width: 100;
+    height: auto;
+    max-height: 30;
+    padding: 1 2;
+    background: $panel;
+    border: round $primary;
+}
+#picker-box > Static { width: auto; }
+#picker-title { text-style: bold; color: $primary; margin-bottom: 1; }
+#picker-table { height: 20; }
+#picker-page  { color: $subtext; margin-top: 1; }
+
+PinnedSetsScreen { align: center middle; }
+
+#pinned-box {
+    width: 80;
+    max-width: 100;
+    height: auto;
+    max-height: 30;
+    padding: 1 2;
+    background: $panel;
+    border: round $primary;
+}
+#pinned-box > Static { width: auto; }
+#pinned-title { text-style: bold; color: $primary; margin-bottom: 1; }
+#pinned-table { height: 20; }
+#pinned-hint  { color: $subtext; margin-top: 1; }
