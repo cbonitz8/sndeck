@@ -68,19 +68,19 @@ sndeck ships two Catppuccin themes — **Macchiato** (dark, default) and **Latte
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `SNDECK_INSTANCE` | `dev` | Instance name in the fork's config |
+| `SNDECK_INSTANCE` | `dev` | Instance name in the happy-platform-mcp config |
 | `SNDECK_SCRATCH` | cwd | Scratch dir holding pulled record folders |
 | `SNDECK_CONFIG` | `~/.config/sndeck/config.toml` | Path to the sndeck config file |
 | `SNDECK_THEME` | `dark` | `"dark"` (Macchiato) or `"light"` (Latte) |
 | `SNDECK_STATE` | `~/.config/sndeck/state.json` | Tracked sets and split pane ratio |
-| `SNDECK_FORK_CONFIG` | `~/.config/sndeck/instances.json` | Where instance `url`/`clientId`/`tokenUrl` come from |
-| `SNDECK_ACCOUNT` | the instance name (e.g. `dev`) | Keychain account key for the refresh token — the fork stores it under `currentInstanceName`, not `<user>@<instance>` (see Auth) |
+| `SNDECK_INSTANCES_CONFIG` | auto: `~/.config/happy-platform-mcp/instances.json` then `~/.config/sndeck/instances.json` | Explicit path to the instance-config JSON; overrides auto-detection. sndeck also honors the MCP's `HAPPY_CONFIG_PATH`. (`SNDECK_FORK_CONFIG` still works as a legacy alias.) |
+| `SNDECK_ACCOUNT` | the instance name (e.g. `dev`) | Keychain account key for the refresh token — happy-platform-mcp stores it under `currentInstanceName`, not `<user>@<instance>` (see Auth) |
 
 ## Auth
 
-sndeck does **not** mint tokens. It reads the refresh token the MCP fork cached in the
+sndeck does **not** mint tokens. It reads the refresh token happy-platform-mcp cached in the
 macOS Keychain (service `happy-platform-mcp`) and replays the refresh grant. If no token
-is present, sndeck fails loud with a visible banner — **sign in via the MCP fork first**.
+is present, sndeck fails loud with a visible banner — **sign in via happy-platform-mcp first**.
 
 ## In a cockpit
 
