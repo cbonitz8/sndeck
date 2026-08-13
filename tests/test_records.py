@@ -200,3 +200,33 @@ def test_dirty_files_from_disk_filters_and_dedupes(tmp_path, monkeypatch):
 
 def test_dirty_files_from_disk_empty(tmp_path):
     assert dirty_files_from_disk(tmp_path) == []
+
+
+def _client_routes(routes):
+    """routes: fn(table, params) -> list[dict]."""
+    def handler(req):
+        table = str(req.url.path).rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"result": routes(table, dict(req.url.params))})
+    return TableClient(INST, FakeToken(), http=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_pull_set_materializes_all_records_and_counts_skips(tmp_path):
+    from sndeck.records import pull_set, PullSummary
+    a, b, gone = "a" * 32, "b" * 32, "c" * 32
+
+    def routes(table, params):
+        if table == "sys_update_xml":
+            return [{"name": "sys_script_" + a}, {"name": "sys_script_" + b},
+                    {"name": "sys_script_" + gone}]
+        if table == "sys_script":
+            q = params.get("sysparm_query", "")
+            if gone in q:
+                return []          # deleted on the instance -> pull_record raises LookupError
+            sid = a if a in q else b
+            return [{"sys_id": sid, "name": "R" + sid[:2], "script": "x"}]
+        return []
+
+    summary = pull_set(_client_routes(routes), tmp_path, "SET1", "My Set")
+    assert summary == PullSummary(pulled=2, skipped=1)
+    ws = set_workspace(tmp_path, "SET1", "My Set")
+    assert {r.sys_id for r in scan_scratch(ws)} == {a, b}

@@ -1454,10 +1454,14 @@ def test_switch_is_relationship_blind(app, monkeypatch):
     'activate the batch' step: batch membership is a commit-time grouping, not a
     current-set concept, so switching never touches other sets' pointers."""
     calls = {}
-    monkeypatch.setattr("sndeck.app.set_current_update_set",
+    # The switch write now lives in updatesets.switch_current_set; _activate_or_switch
+    # delegates to it. Patch the primitives at their canonical home.
+    monkeypatch.setattr("sndeck.updatesets.current_user",
+                        lambda c: type("U", (), {"sys_id": "u", "user_name": "cb"})())
+    monkeypatch.setattr("sndeck.updatesets.set_current_update_set",
                         lambda c, u, sid: calls.setdefault("switched", sid))
     scope_calls = []
-    monkeypatch.setattr("sndeck.app.set_current_application",
+    monkeypatch.setattr("sndeck.updatesets.set_current_application",
                         lambda c, u, scope: scope_calls.append(scope))
     app._activate_or_switch(set_sys_id="6"*32, set_name="scaffold", scope="x_scope")
     assert calls.get("switched") == "6"*32
@@ -1708,8 +1712,11 @@ async def test_refresh_local_preserves_batch_setnode_fields(tmp_path):
 
 def test_pull_one_lands_in_current_set_workspace(app, tmp_path, monkeypatch):
     from sndeck import app as appmod
-    monkeypatch.setattr(appmod, "current_user", lambda c: type("U", (), {"sys_id": "u", "user_name": "cb"})())
-    monkeypatch.setattr(appmod, "current_update_set", lambda c, u: type("S", (), {"sys_id": "5"*32, "name": "talent"})())
+    # Current-set resolution now lives in updatesets.resolve_current_set; patch it there.
+    monkeypatch.setattr("sndeck.updatesets.current_user",
+                        lambda c: type("U", (), {"sys_id": "u", "user_name": "cb"})())
+    monkeypatch.setattr("sndeck.updatesets.current_update_set",
+                        lambda c, u: type("S", (), {"sys_id": "5"*32, "name": "talent"})())
     pulled = {}
     monkeypatch.setattr(appmod, "pull_record",
                         lambda c, t, s, d: pulled.update(dir=str(d), table=t, sys_id=s))

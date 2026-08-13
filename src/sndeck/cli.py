@@ -22,7 +22,7 @@ from .settings import load_sndeck_config, resolve_instance, resolve_scratch
 from .state import load_state
 from .sync import is_dirty, local_field_changes
 from .tree import build_tree
-from .updatesets import (current_update_set, current_user, list_update_sets,
+from .updatesets import (current_user, list_update_sets, resolve_current_set,
                          set_current_update_set, update_set_meta)
 
 
@@ -42,8 +42,7 @@ def _run_reconcile(client, scratch) -> None:
 
 
 def cmd_us_get(client, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         _emit("No current update set.", None, as_json)
         return 0
@@ -85,8 +84,7 @@ def cmd_us_set(client, sys_id: str, *, as_json: bool) -> int:
 
 
 def cmd_pull(client, scratch, table: str, sys_id: str, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         return _fail("no current update set; run 'sndeck us set <sys_id>' first",
                      as_json=as_json)
@@ -161,8 +159,7 @@ def cmd_status(client, scratch, *, as_json: bool) -> int:
 
 
 def cmd_push(client, scratch, table, sys_id, all_: bool, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         return _fail("no current update set; run 'sndeck us set <sys_id>' first",
                      as_json=as_json)

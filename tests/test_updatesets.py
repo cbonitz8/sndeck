@@ -427,3 +427,50 @@ def test_set_scope_pointer_defaults_empty_scope_to_global():
     set_scope_pointer(c, "u1", "", base)
     assert c.posted == [("sys_user_preference",
         {"name": "updateSetForScopeglobal", "user": "u1", "value": base})]
+
+
+def test_resolve_current_set_returns_user_and_set():
+    from sndeck.updatesets import resolve_current_set, CurrentUser
+    def routes(table, params):
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cbonitz"}]
+        if table == "sys_user_preference":
+            return [{"value": "SET1"}]
+        if table == "sys_update_set":
+            return [{"sys_id": "SET1", "name": "hotfix", "state": "in progress"}]
+        return []
+    user, cur = resolve_current_set(_client(routes))
+    assert user == CurrentUser("U1", "cbonitz")
+    assert cur == UpdateSet("SET1", "hotfix", "in progress")
+
+
+def test_resolve_current_set_none_user_gives_none_none():
+    from sndeck.updatesets import resolve_current_set
+    assert resolve_current_set(_client(lambda t, p: [])) == (None, None)
+
+
+def test_resolve_current_set_user_but_no_set():
+    from sndeck.updatesets import resolve_current_set
+    def routes(table, params):
+        return [{"sys_id": "U1", "user_name": "cbonitz"}] if table == "sys_user" else []
+    user, cur = resolve_current_set(_client(routes))
+    assert user is not None and cur is None
+
+
+def test_switch_current_set_writes_pointer_and_scope():
+    from sndeck.updatesets import switch_current_set
+    writes = []
+    def routes(table, params):
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cbonitz"}]
+        if table == "sys_update_set":
+            return [{"name": "hotfix", "application": {"value": "x_scope", "display_value": "App"}}]
+        return []   # no existing prefs -> POSTs
+    # switch_current_set returns True when the user resolves; the write path is exercised
+    # against the mock transport (POST/PATCH accepted).
+    assert switch_current_set(_client(routes), "SET1", "x_scope") is True
+
+
+def test_switch_current_set_false_without_user():
+    from sndeck.updatesets import switch_current_set
+    assert switch_current_set(_client(lambda t, p: []), "SET1") is False

@@ -16,8 +16,7 @@ from .auth import AuthExpiredError
 from .deeplinks import instance_url_for
 from .preview import Preview, PreviewField, build_preview, read_field
 from .prune import reconcile_and_report
-from .push import set_for_record
-from .records import pull_record, scan_scratch, scan_workspace, set_workspace, delete_record_folders, dirty_files_from_disk
+from .records import pull_record, pull_set, scan_scratch, scan_workspace, set_workspace, delete_record_folders, dirty_files_from_disk
 from .registry import CODE_ARTIFACTS
 from .state import load_state
 from .sync import is_dirty
@@ -26,8 +25,8 @@ from .tree import (
     FileNode, ScopeNode, SetNode, TableNode, TreeModel, build_tree,
 )
 from .updatesets import (
-    current_update_set, current_user, list_update_sets, set_current_application,
-    set_current_update_set, update_set_states,
+    list_update_sets, resolve_current_set, switch_current_set, update_set_meta,
+    update_set_states,
 )
 from .watcher import ScratchChanged, watch_scratch
 from . import state as _state
@@ -809,35 +808,24 @@ class SndeckApp(App):
 
     @work(thread=True, exclusive=True, group="pull")
     def _pull(self) -> None:
-        from .records import pull_record, set_workspace
-        from .updatesets import current_update_set, current_user, update_set_records
         try:
-            user = current_user(self._client)
+            user, cur = resolve_current_set(self._client)
             if not user:
                 self.call_from_thread(self.notify, "Could not resolve current ServiceNow user.",
                                       severity="error")
                 self.call_from_thread(self._set_loading, False)
                 return
-            cur = current_update_set(self._client, user.user_name)
             if not cur:
                 self.call_from_thread(self.notify, "No current update set to pull.",
                                       severity="warning")
                 self.call_from_thread(self._set_loading, False)
                 return
-            total, recs = update_set_records(self._client, cur.sys_id)
-            ws = set_workspace(self._scratch, cur.sys_id, cur.name)
-            pulled, skipped = 0, 0
-            for table, sys_id in recs:
-                try:
-                    pull_record(self._client, table, sys_id, ws)
-                    pulled += 1
-                except LookupError:
-                    skipped += 1
-            msg = (f"Pulled {pulled} record(s) from '{cur.name}'"
-                   + (f"  ({skipped} skipped: deleted/missing)" if skipped else "")) if pulled \
-                  else f"'{cur.name}' — nothing to pull."
+            summary = pull_set(self._client, self._scratch, cur.sys_id, cur.name)
+            msg = (f"Pulled {summary.pulled} record(s) from '{cur.name}'"
+                   + (f"  ({summary.skipped} skipped: deleted/missing)" if summary.skipped else "")) \
+                  if summary.pulled else f"'{cur.name}' — nothing to pull."
             self.call_from_thread(self.notify, msg,
-                                  severity="information" if pulled else "warning")
+                                  severity="information" if summary.pulled else "warning")
             tracked = load_state().tracked_sets
             model = build_tree(self._client, self._scratch, tracked)
             self.call_from_thread(self._render_tree, model)
@@ -859,8 +847,7 @@ class SndeckApp(App):
         Callers that need a tree refresh (e.g. _pull_one_worker) are responsible
         for triggering it after this returns.
         """
-        user = current_user(self._client)
-        cur = current_update_set(self._client, user.user_name) if user else None
+        _user, cur = resolve_current_set(self._client)
         if not cur:
             raise ValueError("no-current-set")
         ws = set_workspace(self._scratch, cur.sys_id, cur.name)
@@ -945,12 +932,9 @@ class SndeckApp(App):
         commit-time grouping in ServiceNow, not a 'current set' concept, so switching
         never touches any other set's pointers. Per-scope routing for multi-member
         batches lives in the push path (_do_push_all), which is the only place batch
-        membership actually affects capture. Unit-testable without Textual."""
-        user = current_user(self._client)
-        if not user:
-            return
-        set_current_update_set(self._client, user.sys_id, set_sys_id)
-        set_current_application(self._client, user.sys_id, scope)
+        membership actually affects capture. The write itself lives in
+        updatesets.switch_current_set — testable without Textual."""
+        switch_current_set(self._client, set_sys_id, scope)
 
     @work(thread=True, exclusive=True, group="write")
     def _do_switch(self, set_sys_id: str, set_name: str) -> None:
@@ -1142,18 +1126,10 @@ class SndeckApp(App):
 
     @work(thread=True, exclusive=True, group="pull")
     def _pull_sets(self, sys_ids: list) -> None:
-        from .records import pull_record, set_workspace
-        from .updatesets import update_set_records, update_set_meta
         try:
             for sid in sys_ids:
                 meta = update_set_meta(self._client, sid)
-                ws = set_workspace(self._scratch, sid, meta.name if meta else sid)
-                _, recs = update_set_records(self._client, sid)
-                for table, rec_id in recs:
-                    try:
-                        pull_record(self._client, table, rec_id, ws)
-                    except LookupError:
-                        pass
+                pull_set(self._client, self._scratch, sid, meta.name if meta else sid)
             model = build_tree(self._client, self._scratch, load_state().tracked_sets)
             self.call_from_thread(self._render_tree, model)
         except AuthExpiredError as e:

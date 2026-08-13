@@ -5,6 +5,7 @@ is owned by .scratch — this module re-exports those names for existing
 importers and focuses on the network->disk pull."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from .registry import CODE_ARTIFACTS
@@ -35,6 +36,29 @@ def pull_record(client, table: str, sys_id: str, scratch_dir) -> RecordRef:
                 (folder / snapshot.field_file(f)).write_text(str(fields[f]), encoding="utf-8")
 
     return RecordRef(table, sys_id, name, folder)
+
+
+@dataclass(frozen=True)
+class PullSummary:
+    pulled: int
+    skipped: int
+
+
+def pull_set(client, scratch_dir, set_sys_id: str, set_name: str) -> PullSummary:
+    """Materialize a whole update set: fetch its records and pull each into the set's
+    workspace, counting LookupError skips (deleted/missing on the instance). The 'pull a
+    set' domain op the TUI's _pull and _pull_sets both hand-rolled from raw primitives."""
+    from .updatesets import update_set_records
+    ws = set_workspace(scratch_dir, set_sys_id, set_name)
+    _total, recs = update_set_records(client, set_sys_id)
+    pulled = skipped = 0
+    for table, sys_id in recs:
+        try:
+            pull_record(client, table, sys_id, ws)
+            pulled += 1
+        except LookupError:
+            skipped += 1
+    return PullSummary(pulled, skipped)
 
 
 def dirty_files_from_disk(scratch) -> list:
