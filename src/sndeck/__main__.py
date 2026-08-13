@@ -11,7 +11,7 @@ from .rest import TableClient
 from .settings import load_sndeck_config, resolve_scratch, resolve_instance, resolve_theme
 
 
-_SUBCOMMANDS = {"us", "pull", "status", "push"}
+_SUBCOMMANDS = {"us", "pull", "status", "push", "refresh"}
 _HELP_FLAGS = {"-h", "--help", "help"}
 
 _USAGE = """\
@@ -24,6 +24,9 @@ Usage:
   sndeck pull <table> <id>     Download a record to the current set's workspace
   sndeck status                Show the current set's staging area
   sndeck push <table> <id>     Push one staged record   (push --all for all)
+  sndeck refresh <table> <id>  Rebase a record's snapshot from the instance
+                               (refresh --all for every on-disk record;
+                                --overwrite-local to also replace local files)
 
 Add --json to any subcommand for machine-readable output.
 Run `sndeck <subcommand> --help` for that subcommand's options.
