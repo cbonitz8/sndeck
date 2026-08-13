@@ -474,3 +474,10 @@ def test_switch_current_set_writes_pointer_and_scope():
 def test_switch_current_set_false_without_user():
     from sndeck.updatesets import switch_current_set
     assert switch_current_set(_client(lambda t, p: []), "SET1") is False
+
+
+def test_read_pref_returns_value_or_none():
+    from sndeck.updatesets import read_pref
+    c = _RecordingClient({"name=apps.current_app^user=u1": [{"value": "x_scope"}]})
+    assert read_pref(c, "u1", "apps.current_app") == "x_scope"
+    assert read_pref(c, "u1", "missing") is None

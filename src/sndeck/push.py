@@ -8,7 +8,7 @@ from .auth import AuthExpiredError
 from .records import pull_record
 from .sync import build_push_plan, apply_push
 from .tree import owner_of_record
-from .updatesets import current_user, set_scope_pointer, set_current_application
+from .updatesets import current_user, read_pref, set_scope_pointer, set_current_application
 
 
 def set_for_record(model, table: str, sys_id: str) -> tuple[str, str] | None:
@@ -35,20 +35,13 @@ class PushOutcome:
     warning: str | None = None       # scope-routing warning, else None
 
 
-def _current_scope_pref(client, user_sys_id: str) -> str | None:
-    prefs = client.query("sys_user_preference",
-                         query=f"name=apps.current_app^user={user_sys_id}",
-                         fields=["value"], limit=1)
-    return prefs[0].get("value") if prefs else None
-
-
 def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
     """Push every staged record path. Per-record: build plan, route the record's scope
     pointer to its owning batch member, align the active scope only when it changes,
     apply, then re-pull to refresh the snapshot. A failed record becomes a not-pushed
     outcome and the rest still push. AuthExpiredError propagates (never swallowed)."""
     user = current_user(client)
-    aligned = _current_scope_pref(client, user.sys_id) if user else None
+    aligned = read_pref(client, user.sys_id, "apps.current_app") if user else None
     outcomes: list[PushOutcome] = []
     for path in record_paths:
         table = sys_id = name = ""

@@ -214,6 +214,16 @@ def update_set_entries(client, set_sys_id: str) -> list[Entry]:
     return out
 
 
+def read_pref(client, user_sys_id: str, name: str) -> str | None:
+    """The value of the user's preference of this name, or None if unset. The read
+    counterpart to _upsert_pref — the single owner of the sys_user_preference query
+    shape (push previously hand-built its own copy)."""
+    prefs = client.query("sys_user_preference",
+                         query=f"name={name}^user={user_sys_id}",
+                         fields=["value"], limit=1)
+    return prefs[0].get("value") if prefs else None
+
+
 def _upsert_pref(client, user_sys_id: str, name: str, value: str) -> None:
     """PATCH the user's preference of this name if it exists, else POST a new one."""
     prefs = client.query("sys_user_preference",
