@@ -42,14 +42,10 @@ def current_update_set(client, username: str) -> UpdateSet | None:
 
 
 def _cap(row: dict) -> Capture:
-    def dv(f):
-        v = row.get(f, {})
-        return v.get("display_value", "") if isinstance(v, dict) else (v or "")
-    def raw(f):
-        v = row.get(f, {})
-        return v.get("value", "") if isinstance(v, dict) else (v or "")
-    return Capture(created=raw("sys_created_on"), type=dv("type"),
-                   target=dv("target_name"), set_name=dv("update_set"), set_id=raw("update_set"))
+    # value/display-value unwrap is _raw/_dv (defined below); no local re-implementation.
+    return Capture(created=_raw(row, "sys_created_on"), type=_dv(row, "type"),
+                   target=_dv(row, "target_name"),
+                   set_name=_dv(row, "update_set"), set_id=_raw(row, "update_set"))
 
 
 def recent_captures(client, username: str, hours: int = 2, limit: int = 50) -> list[Capture]:
@@ -60,13 +56,6 @@ def recent_captures(client, username: str, hours: int = 2, limit: int = 50) -> l
                         fields=["sys_created_on", "type", "target_name", "update_set"],
                         display_value="all", limit=limit)
     return [_cap(r) for r in rows]
-
-
-def whoami(client) -> str | None:
-    """Return the current (token) user's user_name via a read-only query."""
-    rows = client.query("sys_user", query="sys_id=javascript:gs.getUserID()",
-                        fields=["user_name"], limit=1)
-    return rows[0].get("user_name") if rows else None
 
 
 def update_set_records(client, set_sys_id: str) -> tuple[int, list[tuple[str, str]]]:

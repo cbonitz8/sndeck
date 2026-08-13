@@ -74,15 +74,6 @@ def test_capture_for_record_none_when_never_captured():
     assert capture_for_record(_client(lambda t, p: []), "sys_script", "zzz") is None
 
 
-def test_whoami_returns_user_name():
-    def routes(table, params):
-        assert table == "sys_user"
-        assert "gs.getUserID()" in params.get("sysparm_query", "")
-        return [{"user_name": "cbonitz"}]
-    from sndeck.updatesets import whoami
-    assert whoami(_client(routes)) == "cbonitz"
-
-
 def test_records_in_update_set_filters_and_dedups():
     def routes(table, params):
         assert table == "sys_update_xml"
