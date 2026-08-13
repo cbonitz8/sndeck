@@ -23,30 +23,13 @@ CLI owns the single client.get_record call.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
-from .registry import CODE_ARTIFACTS, field_extension
-from .scratch import RECORD_JSON, SNAPSHOT_JSON, orphans, set_workspaces
-from .sync import _norm
-
-
-def _instance_fields(instance_record: dict) -> dict:
-    """The persisted-snapshot view of a live record: every non-underscore column,
-    matching exactly what records.pull_record writes to .snapshot.json."""
-    return {k: v for k, v in instance_record.items() if not k.startswith("_")}
-
-
-def _read_meta(record_path) -> tuple[str, str, str]:
-    meta = json.loads((Path(record_path) / RECORD_JSON).read_text()).get("_meta", {})
-    return meta.get("table", ""), meta.get("sys_id", ""), meta.get("name", "")
-
-
-def _read_snapshot(record_path) -> dict:
-    p = Path(record_path) / SNAPSHOT_JSON
-    return json.loads(p.read_text()) if p.exists() else {}
+from .registry import CODE_ARTIFACTS
+from . import snapshot
+from .snapshot import _norm, field_file, instance_fields as _instance_fields
+from .scratch import orphans, set_workspaces
 
 
 def find_record_folders(root, table: str, sys_id: str) -> list[Path]:
@@ -107,8 +90,8 @@ def plan_refresh(record_path, instance_fields: dict) -> RefreshPlan:
     """Network-free classification of a refresh. `instance_fields` is the live record's
     non-underscore columns (see _instance_fields)."""
     record_path = Path(record_path)
-    table, sys_id, name = _read_meta(record_path)
-    snap = _read_snapshot(record_path)
+    table, sys_id, name = snapshot.read_meta(record_path)
+    snap = snapshot.read_snapshot(record_path)
     art = CODE_ARTIFACTS.get(table)
     fields = art.script_fields if art else ()
 
@@ -118,7 +101,7 @@ def plan_refresh(record_path, instance_fields: dict) -> RefreshPlan:
         inst_v = str(instance_fields.get(f, "") or "")
         if _norm(str(snap.get(f, "") or "")) != _norm(inst_v):
             snapshot_stale.append(f)
-        fp = record_path / f"{f}{field_extension(f)}"
+        fp = record_path / field_file(f)
         if fp.exists() and _norm(fp.read_text(encoding="utf-8")) != _norm(inst_v):
             local_diverged.append(f)
     return RefreshPlan(table, sys_id, name, snapshot_stale, local_diverged)
@@ -171,14 +154,13 @@ def apply_refresh(record_path, instance_record: dict, *,
                               False, True, False, _refuse_reason(plan.local_diverged),
                               [], [], False)
 
-    (record_path / SNAPSHOT_JSON).write_text(
-        json.dumps(inst_fields, indent=2), encoding="utf-8")
+    snapshot.write_snapshot(record_path, inst_fields)
 
     local_changed: list[str] = []
     if overwrite_local:
         art = CODE_ARTIFACTS.get(plan.table)
         for f in (art.script_fields if art else ()):
-            fp = record_path / f"{f}{field_extension(f)}"
+            fp = record_path / field_file(f)
             newv = str(inst_fields.get(f, "") or "")
             oldv = fp.read_text(encoding="utf-8") if fp.exists() else ""
             if newv == "":
@@ -189,19 +171,10 @@ def apply_refresh(record_path, instance_record: dict, *,
                 if _norm(oldv) != _norm(newv):
                     local_changed.append(f)
                 fp.write_text(newv, encoding="utf-8")
-        _rewrite_record_json(record_path, plan.table, plan.sys_id, plan.name, inst_fields)
+        # --overwrite-local is a full local re-materialization; snapshot-only refresh
+        # never touches record.json.
+        snapshot.write_record_json(record_path, plan.table, plan.sys_id, plan.name, inst_fields)
 
     return RefreshOutcome(plan.table, plan.sys_id, plan.name, str(record_path),
                           True, False, False, None,
                           list(plan.snapshot_stale), local_changed, True)
-
-
-def _rewrite_record_json(record_path, table, sys_id, name, inst_fields: dict) -> None:
-    """Rewrite record.json from the instance, preserving the folder's _meta identity
-    and stamping a fresh pulled_at. Only used by --overwrite-local (a full local
-    re-materialization); snapshot-only refresh never touches record.json."""
-    body = {"_meta": {"table": table, "sys_id": sys_id, "name": name,
-                      "pulled_at": datetime.now(timezone.utc).isoformat()},
-            **inst_fields}
-    (Path(record_path) / RECORD_JSON).write_text(
-        json.dumps(body, indent=2), encoding="utf-8")

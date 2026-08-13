@@ -42,14 +42,10 @@ def current_update_set(client, username: str) -> UpdateSet | None:
 
 
 def _cap(row: dict) -> Capture:
-    def dv(f):
-        v = row.get(f, {})
-        return v.get("display_value", "") if isinstance(v, dict) else (v or "")
-    def raw(f):
-        v = row.get(f, {})
-        return v.get("value", "") if isinstance(v, dict) else (v or "")
-    return Capture(created=raw("sys_created_on"), type=dv("type"),
-                   target=dv("target_name"), set_name=dv("update_set"), set_id=raw("update_set"))
+    # value/display-value unwrap is _raw/_dv (defined below); no local re-implementation.
+    return Capture(created=_raw(row, "sys_created_on"), type=_dv(row, "type"),
+                   target=_dv(row, "target_name"),
+                   set_name=_dv(row, "update_set"), set_id=_raw(row, "update_set"))
 
 
 def recent_captures(client, username: str, hours: int = 2, limit: int = 50) -> list[Capture]:
@@ -60,13 +56,6 @@ def recent_captures(client, username: str, hours: int = 2, limit: int = 50) -> l
                         fields=["sys_created_on", "type", "target_name", "update_set"],
                         display_value="all", limit=limit)
     return [_cap(r) for r in rows]
-
-
-def whoami(client) -> str | None:
-    """Return the current (token) user's user_name via a read-only query."""
-    rows = client.query("sys_user", query="sys_id=javascript:gs.getUserID()",
-                        fields=["user_name"], limit=1)
-    return rows[0].get("user_name") if rows else None
 
 
 def update_set_records(client, set_sys_id: str) -> tuple[int, list[tuple[str, str]]]:
@@ -150,6 +139,19 @@ def current_user(client) -> CurrentUser | None:
     return CurrentUser(r.get("sys_id", ""), r.get("user_name", ""))
 
 
+def resolve_current_set(client) -> tuple["CurrentUser | None", "UpdateSet | None"]:
+    """The token user and their current update set — the resolution every set-scoped
+    pull/push begins with, in both the CLI and the TUI (was copy-pasted at 5 call sites).
+
+    Returns (None, None) when the user can't be resolved, (user, None) when there is a
+    user but no current set, and (user, set) otherwise — so callers can word the two
+    guard failures distinctly."""
+    user = current_user(client)
+    if user is None:
+        return None, None
+    return user, current_update_set(client, user.user_name)
+
+
 def update_set_meta(client, set_sys_id: str) -> UpdateSetMeta | None:
     rows = client.query("sys_update_set", query=f"sys_id={set_sys_id}",
                         fields=["sys_id", "name", "state", "application"],
@@ -199,6 +201,16 @@ def update_set_entries(client, set_sys_id: str) -> list[Entry]:
         name = _dv(r, "target_name") or _raw(r, "target_name") or key[1]
         out.append(Entry(key[0], key[1], name, _dv(r, "type") or _raw(r, "type")))
     return out
+
+
+def read_pref(client, user_sys_id: str, name: str) -> str | None:
+    """The value of the user's preference of this name, or None if unset. The read
+    counterpart to _upsert_pref — the single owner of the sys_user_preference query
+    shape (push previously hand-built its own copy)."""
+    prefs = client.query("sys_user_preference",
+                         query=f"name={name}^user={user_sys_id}",
+                         fields=["value"], limit=1)
+    return prefs[0].get("value") if prefs else None
 
 
 def _upsert_pref(client, user_sys_id: str, name: str, value: str) -> None:
@@ -336,6 +348,23 @@ def set_current_application(client, user_sys_id: str, scope_id: str) -> None:
     """Switch the user's active application scope. scope_id is a sys_scope sys_id
     or the literal 'global'. Mirrors set_current_update_set's pref-upsert."""
     _upsert_pref(client, user_sys_id, "apps.current_app", scope_id)
+
+
+def switch_current_set(client, set_sys_id: str, scope: str = "global") -> bool:
+    """Switch the current update set and align the active application scope to it.
+    Returns False if the token user can't be resolved (nothing written), else True.
+
+    Deliberately relationship-blind: a set's parent/child (batch) membership is a
+    commit-time grouping in ServiceNow, not a 'current set' concept, so switching only
+    ever points the chosen set's own prefs — never any sibling's. Per-scope routing for
+    multi-member batches lives in the push path (set_scope_pointer), the one place batch
+    membership actually affects capture. Pure domain write — no Textual."""
+    user = current_user(client)
+    if user is None:
+        return False
+    set_current_update_set(client, user.sys_id, set_sys_id)
+    set_current_application(client, user.sys_id, scope)
+    return True
 
 
 def set_scope_pointer(client, user_sys_id: str, scope_id: str, set_sys_id: str) -> None:

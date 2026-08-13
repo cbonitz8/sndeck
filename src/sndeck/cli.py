@@ -13,15 +13,16 @@ from .config import load_instance
 from .prune import reconcile_and_report
 from .push import push_all, push_one
 from .records import pull_record, set_workspace
-from .refresh import (_read_meta, all_record_folders, apply_refresh,
+from .refresh import (all_record_folders, apply_refresh,
                       find_record_folders, missing_outcome)
 from .rest import TableClient
 from .scratch import set_workspaces
+from .snapshot import read_meta
 from .settings import load_sndeck_config, resolve_instance, resolve_scratch
 from .state import load_state
 from .sync import is_dirty, local_field_changes
-from .tree import build_tree
-from .updatesets import (current_update_set, current_user, list_update_sets,
+from .tree import build_tree, find_set
+from .updatesets import (current_user, list_update_sets, resolve_current_set,
                          set_current_update_set, update_set_meta)
 
 
@@ -41,8 +42,7 @@ def _run_reconcile(client, scratch) -> None:
 
 
 def cmd_us_get(client, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         _emit("No current update set.", None, as_json)
         return 0
@@ -84,8 +84,7 @@ def cmd_us_set(client, sys_id: str, *, as_json: bool) -> int:
 
 
 def cmd_pull(client, scratch, table: str, sys_id: str, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         return _fail("no current update set; run 'sndeck us set <sys_id>' first",
                      as_json=as_json)
@@ -107,14 +106,10 @@ def cmd_pull(client, scratch, table: str, sys_id: str, *, as_json: bool) -> int:
 
 
 def _find_set_node(model, sys_id: str):
-    """Return (SetNode, scope display name) for sys_id, searching top-level sets and
-    their nested batch members; (None, None) if absent."""
-    for scope in model.scopes:
-        for setn in scope.sets:
-            for cand in [setn, *setn.members]:
-                if cand.sys_id == sys_id:
-                    return cand, scope.name
-    return None, None
+    """(SetNode, scope display name) for sys_id at any depth; (None, None) if absent.
+    Model traversal lives in tree.find_set."""
+    found = find_set(model, sys_id)
+    return (found[0], found[1].name) if found is not None else (None, None)
 
 
 def _record_state(f) -> str:
@@ -160,8 +155,7 @@ def cmd_status(client, scratch, *, as_json: bool) -> int:
 
 
 def cmd_push(client, scratch, table, sys_id, all_: bool, *, as_json: bool) -> int:
-    user = current_user(client)
-    cur = current_update_set(client, user.user_name) if user else None
+    _user, cur = resolve_current_set(client)
     if cur is None:
         return _fail("no current update set; run 'sndeck us set <sys_id>' first",
                      as_json=as_json)
@@ -232,7 +226,7 @@ def cmd_refresh(client, scratch, table, sys_id, all_, overwrite_local, *,
 
     outcomes = []
     for folder in folders:
-        t, s, name = _read_meta(folder)
+        t, s, name = read_meta(folder)
         rec = client.get_record(t, s, display_value="false")
         if rec is None:
             outcomes.append(missing_outcome(folder, t, s, name))

@@ -1,59 +1,20 @@
-"""Push logic: diff local field files vs the pulled .snapshot.json, and (Task 14)
-detect instance drift before writing. The local diff also powers the tree's ✎ flag."""
+"""Push logic: diff local field files vs the pulled .snapshot.json, and detect
+instance drift before writing. The snapshot read/write, the field->file rule, and the
+"dirty" predicate live in .snapshot; this module owns the push plan built on top of them.
+
+The local-edit names (`local_field_changes`, `is_dirty`, `FieldChange`, `_norm`) are
+re-exported from .snapshot for importers and tests that still reach for them here."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .registry import CODE_ARTIFACTS, field_extension
+from .registry import CODE_ARTIFACTS
+from .snapshot import (FieldChange, _norm, field_changes as local_field_changes,
+                       is_dirty, read_meta as _read_meta, read_snapshot as _read_snapshot)
 
-
-def _norm(s: str) -> str:
-    return (s or "").replace("\r\n", "\n").replace("\r", "\n")
-
-
-@dataclass(frozen=True)
-class FieldChange:
-    field: str
-    local: str
-    snapshot: str
-
-
-def _read_meta(record_path) -> tuple[str, str, str]:
-    meta = json.loads((Path(record_path) / "record.json").read_text()).get("_meta", {})
-    return meta.get("table", ""), meta.get("sys_id", ""), meta.get("name", "")
-
-
-def _read_snapshot(record_path) -> dict:
-    p = Path(record_path) / ".snapshot.json"
-    return json.loads(p.read_text()) if p.exists() else {}
-
-
-def local_field_changes(record_path) -> list[FieldChange]:
-    record_path = Path(record_path)
-    table, _, _ = _read_meta(record_path)
-    art = CODE_ARTIFACTS.get(table)
-    if not art:
-        return []
-    snap = _read_snapshot(record_path)
-    changes: list[FieldChange] = []
-    for f in art.script_fields:
-        fp = record_path / f"{f}{field_extension(f)}"
-        if not fp.exists():
-            continue
-        local = fp.read_text(encoding="utf-8")
-        snapv = str(snap.get(f, "") or "")
-        if _norm(local) != _norm(snapv):
-            changes.append(FieldChange(f, local, snapv))
-    return changes
-
-
-def is_dirty(record_path) -> bool:
-    try:
-        return bool(local_field_changes(record_path))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return False
+__all__ = ["FieldChange", "local_field_changes", "is_dirty", "PushPlan",
+           "build_push_plan", "apply_push"]
 
 
 @dataclass(frozen=True)
