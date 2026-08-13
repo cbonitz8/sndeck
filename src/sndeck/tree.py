@@ -2,6 +2,7 @@
 Content of files comes from the local scratch dir; set membership from the instance."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -75,6 +76,43 @@ class TreeModel:
     scopes: list[ScopeNode]
     current_set: UpdateSet | None
     error: str | None = None
+
+
+def _walk_set(scope: "ScopeNode", setn: "SetNode") -> Iterator[tuple["ScopeNode", "SetNode"]]:
+    yield scope, setn
+    for m in setn.members:
+        yield from _walk_set(scope, m)
+
+
+def iter_sets(model: "TreeModel | None") -> Iterator[tuple["ScopeNode", "SetNode"]]:
+    """Every (scope, set) in the model — top-level sets AND their nested batch members —
+    depth-first. The one traversal of the set hierarchy; find_set / owner_of_record and
+    the model's own consumers walk through here instead of re-recursing by hand."""
+    if model is None:
+        return
+    for scope in model.scopes:
+        for setn in scope.sets:
+            yield from _walk_set(scope, setn)
+
+
+def find_set(model: "TreeModel | None", set_sys_id: str) -> tuple["SetNode", "ScopeNode"] | None:
+    """The (SetNode, its ScopeNode) with this sys_id at ANY depth, or None. Lets a scoped
+    batch member be resolved to its own scope, not a global fallback."""
+    for scope, setn in iter_sets(model):
+        if setn.sys_id == set_sys_id:
+            return setn, scope
+    return None
+
+
+def owner_of_record(model: "TreeModel | None", table: str, sys_id: str) -> tuple[str, str] | None:
+    """(raw scope sys_id, owning set sys_id) for the set that stages (table, sys_id), at
+    any depth; None if unstaged. Drives push's per-record scope routing."""
+    for _scope, setn in iter_sets(model):
+        for tbl in setn.tables:
+            for f in tbl.files:
+                if f.table == table and f.sys_id == sys_id:
+                    return (setn.scope, setn.sys_id)
+    return None
 
 
 def dirty_files(model: TreeModel) -> list[FileNode]:

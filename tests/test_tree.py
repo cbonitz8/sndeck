@@ -280,3 +280,41 @@ def test_batch_base_nests_members(fake_batch_client):
     assert "cc" * 16 in base_record_ids, (
         f"Base's own record (RecordC) missing from tables after reconstruction; found {base_record_ids!r}"
     )
+
+
+# ── model lookups (find_set / owner_of_record) ───────────────────────────────
+
+def _model_with_batch():
+    from sndeck.tree import SetNode, ScopeNode, TableNode, FileNode, TreeModel
+    a = "a" * 32
+    child_file = FileNode("sys_script", a, "R", in_current_set=False, tracked=True,
+                          local=False, dirty=False, record_path=None)
+    child = SetNode("C" * 32, "child", "in progress", False,
+                    [TableNode("sys_script", "Business Rules", [child_file])],
+                    scope="x_child", is_base=False, members=[])
+    base = SetNode("B" * 32, "base", "in progress", True, [],
+                   scope="global", is_base=True, members=[child])
+    return TreeModel([ScopeNode("Global", [base])], current_set=None), a
+
+
+def test_find_set_resolves_nested_member_to_its_scope():
+    model, _a = _model_with_batch()
+    node, scope = tree.find_set(model, "C" * 32)
+    assert node.sys_id == "C" * 32 and node.scope == "x_child" and scope.name == "Global"
+    assert tree.find_set(model, "B" * 32)[0].sys_id == "B" * 32
+    assert tree.find_set(model, "z" * 32) is None
+    assert tree.find_set(None, "B" * 32) is None
+
+
+def test_owner_of_record_finds_staging_set_at_any_depth():
+    model, a = _model_with_batch()
+    assert tree.owner_of_record(model, "sys_script", a) == ("x_child", "C" * 32)
+    assert tree.owner_of_record(model, "sys_script", "z" * 32) is None
+    assert tree.owner_of_record(None, "sys_script", a) is None
+
+
+def test_iter_sets_yields_base_then_members():
+    model, _a = _model_with_batch()
+    ids = [s.sys_id for _scope, s in tree.iter_sets(model)]
+    assert ids == ["B" * 32, "C" * 32]
+    assert list(tree.iter_sets(None)) == []

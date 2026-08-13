@@ -21,7 +21,7 @@ from .snapshot import read_meta
 from .settings import load_sndeck_config, resolve_instance, resolve_scratch
 from .state import load_state
 from .sync import is_dirty, local_field_changes
-from .tree import build_tree
+from .tree import build_tree, find_set
 from .updatesets import (current_user, list_update_sets, resolve_current_set,
                          set_current_update_set, update_set_meta)
 
@@ -106,14 +106,10 @@ def cmd_pull(client, scratch, table: str, sys_id: str, *, as_json: bool) -> int:
 
 
 def _find_set_node(model, sys_id: str):
-    """Return (SetNode, scope display name) for sys_id, searching top-level sets and
-    their nested batch members; (None, None) if absent."""
-    for scope in model.scopes:
-        for setn in scope.sets:
-            for cand in [setn, *setn.members]:
-                if cand.sys_id == sys_id:
-                    return cand, scope.name
-    return None, None
+    """(SetNode, scope display name) for sys_id at any depth; (None, None) if absent.
+    Model traversal lives in tree.find_set."""
+    found = find_set(model, sys_id)
+    return (found[0], found[1].name) if found is not None else (None, None)
 
 
 def _record_state(f) -> str:

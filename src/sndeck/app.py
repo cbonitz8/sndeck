@@ -22,7 +22,7 @@ from .state import load_state
 from .sync import is_dirty
 from .theme import LATTE, MACCHIATO, THEMES, next_theme
 from .tree import (
-    FileNode, ScopeNode, SetNode, TableNode, TreeModel, build_tree,
+    FileNode, ScopeNode, SetNode, TableNode, TreeModel, build_tree, find_set,
 )
 from .updatesets import (
     list_update_sets, resolve_current_set, switch_current_set, update_set_meta,
@@ -900,28 +900,11 @@ class SndeckApp(App):
         self.push_screen(SwitchConfirmScreen(set_name), after)
 
     def _scope_for_set(self, set_sys_id: str) -> str | None:
-        """Raw scope of the SetNode with this sys_id in the current model — searching
-        top-level sets AND nested batch members — so any set (base, member, or
-        standalone) switches into its own scope. None if not found."""
-        model = self._last_model
-        if model is None:
-            return None
-
-        def _find(setn):
-            if setn.sys_id == set_sys_id:
-                return setn.scope
-            for m in setn.members:
-                found = _find(m)
-                if found is not None:
-                    return found
-            return None
-
-        for sc in model.scopes:
-            for setn in sc.sets:
-                found = _find(setn)
-                if found is not None:
-                    return found
-        return None
+        """Raw scope of the set with this sys_id in the current model, at any depth, so a
+        base/member/standalone set switches into its own scope. None if not found. Model
+        traversal lives in tree.find_set."""
+        found = find_set(self._last_model, set_sys_id)
+        return found[0].scope if found is not None else None
 
     def _activate_or_switch(self, set_sys_id: str, set_name: str, scope: str) -> None:
         """Switch the current update set — nothing more. Points the chosen set's prefs

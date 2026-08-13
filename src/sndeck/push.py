@@ -7,41 +7,19 @@ from pathlib import Path
 from .auth import AuthExpiredError
 from .records import pull_record
 from .sync import build_push_plan, apply_push
+from .tree import owner_of_record
 from .updatesets import current_user, set_scope_pointer, set_current_application
 
 
 def set_for_record(model, table: str, sys_id: str) -> tuple[str, str] | None:
-    """Return (raw scope sys_id, owning set sys_id) for the SetNode that owns
-    (table, sys_id), searching top-level sets and their nested batch members.
-
-    The owning set matters for push routing: a staged record must capture into the
-    exact batch member it belongs to, so the push path points that member's scope
-    pointer at it. Returns None if not found. Pure helper — no network, no UI.
-    """
-    def _search_set(setn) -> tuple[str, str] | None:
-        for tbl in setn.tables:
-            for f in tbl.files:
-                if f.table == table and f.sys_id == sys_id:
-                    return (setn.scope, setn.sys_id)
-        for m in setn.members:
-            result = _search_set(m)
-            if result is not None:
-                return result
-        return None
-
-    if model is None:
-        return None
-    for scope in model.scopes:
-        for setn in scope.sets:
-            result = _search_set(setn)
-            if result is not None:
-                return result
-    return None
+    """(raw scope sys_id, owning set sys_id) for the set that stages (table, sys_id) —
+    the record-owner lookup push routing needs. The model traversal itself lives in
+    tree.owner_of_record; this is the push-side name for it."""
+    return owner_of_record(model, table, sys_id)
 
 
 def scope_for_record(model, table: str, sys_id: str) -> str | None:
-    """Raw scope sys_id of the SetNode that owns (table, sys_id); None if not found.
-    Thin wrapper over set_for_record for callers that only need the scope."""
+    """Raw scope sys_id of the set that stages (table, sys_id); None if unstaged."""
     found = set_for_record(model, table, sys_id)
     return found[0] if found is not None else None
 
