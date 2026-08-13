@@ -32,6 +32,45 @@ owner: **switch current update set** (`s`) and **push local edits** (`P`). Push 
 clobber-guarded — it refuses if the instance changed a field you're about to write since
 you pulled. It never edits code (use your editor/agent) and never moves records.
 
+## Headless / agent subcommands
+
+For non-interactive use (agents, scripts, CI) sndeck exposes a small CLI. Add `--json`
+to any subcommand for machine-readable output.
+
+```
+sndeck us get|ls|set <id>     # show / list / switch the current update set
+sndeck pull <table> <id>      # download a record into the current set's workspace
+sndeck status                 # the current set's staging area (clean/dirty/local-only)
+sndeck push <table> <id>      # push one staged record   (push --all for all dirty)
+sndeck refresh <table> <id>   # rebase a record's snapshot from the instance
+```
+
+The normal loop is **pull → edit → push**. `status`/`ls` also run a best-effort prune:
+a set's workspace is deleted once the set leaves *in progress* and every record in it is
+clean.
+
+**`refresh` — clearing "phantom dirty".** A record is *dirty* purely when its local field
+files differ from its frozen `.snapshot.json` baseline. If a record's local files end up
+matching the instance while the snapshot does not — e.g. it was pushed via a *different*
+update set, or its set was marked complete before the push — the folder stays dirty
+forever: prune keeps it (warning `⚠ set '…' is complete but has unpushed edits — not
+pruned`), and it can't be re-pulled because pull needs the set to be current and a
+complete set won't stay current. `refresh` is the way out — it re-reads the live record
+and rebases that folder's `.snapshot.json` **regardless of the enclosing set's state and
+without needing it to be current**. Once the snapshot matches, the record goes clean and
+prune reaps it on the next `status`. Use this instead of hand-editing `.snapshot.json` or
+deleting the folder by hand.
+
+- `sndeck refresh <table> <id>` — snapshot-only. Finds the folder(s) by scanning every
+  workspace for a matching `record.json`; rebases the snapshot. This is also the fix for
+  push's `instance changed since pull … — refresh first` clobber-guard error.
+- `sndeck refresh --all` — do it for every record in every on-disk workspace (best-effort;
+  skips-and-reports anything it can't safely resolve).
+- `--overwrite-local` — if the local files genuinely diverge from the instance, a
+  snapshot-only rebase is *refused* (it would leave the record dirty and retire the drift
+  guard). Pass this to replace the local files with the instance copy, discarding the local
+  edit (the discarded fields are printed).
+
 ## Configuration
 
 ### Config file — `~/.config/sndeck/config.toml`

@@ -1,4 +1,4 @@
-"""Non-interactive sndeck subcommands (us/pull/status/push) for headless/agent use."""
+"""Non-interactive sndeck subcommands (us/pull/status/push/refresh) for headless/agent use."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,8 @@ from .config import load_instance
 from .prune import reconcile_and_report
 from .push import push_all, push_one
 from .records import pull_record, set_workspace
+from .refresh import (_read_meta, all_record_folders, apply_refresh,
+                      find_record_folders, missing_outcome)
 from .rest import TableClient
 from .scratch import set_workspaces
 from .settings import load_sndeck_config, resolve_instance, resolve_scratch
@@ -199,6 +201,63 @@ def cmd_push(client, scratch, table, sys_id, all_: bool, *, as_json: bool) -> in
     return 0
 
 
+def _refresh_human(o) -> str:
+    if o.missing:
+        return f"✗ {o.table}/{o.name}  {o.folder} — no longer exists on the instance"
+    if o.refused:
+        return f"✗ {o.table}/{o.name}  {o.folder} — {o.reason}"
+    base = ", ".join(o.snapshot_changed) if o.snapshot_changed else "already current"
+    line = f"✓ refreshed {o.table}/{o.name}  {o.folder} — snapshot: {base}"
+    if o.local_changed:
+        line += f"; local overwritten: {', '.join(o.local_changed)}"
+    line += "; clean" if o.clean_after else ""
+    return line
+
+
+def cmd_refresh(client, scratch, table, sys_id, all_, overwrite_local, *,
+                as_json: bool) -> int:
+    """Re-read live records and rebase their .snapshot.json, regardless of the enclosing
+    set's update-set state and without needing that set to be current."""
+    if all_:
+        folders = all_record_folders(scratch)
+        if not folders:
+            _emit("no records on disk to refresh", [], as_json)
+            return 0
+    else:
+        if not (table and sys_id):
+            return _fail("refresh requires <table> <sys_id> or --all", as_json=as_json)
+        folders = find_record_folders(scratch, table, sys_id)
+        if not folders:
+            return _fail(f"{table}/{sys_id} not found in any workspace", as_json=as_json)
+
+    outcomes = []
+    for folder in folders:
+        t, s, name = _read_meta(folder)
+        rec = client.get_record(t, s, display_value="false")
+        if rec is None:
+            outcomes.append(missing_outcome(folder, t, s, name))
+        else:
+            outcomes.append(apply_refresh(folder, rec, overwrite_local=overwrite_local))
+
+    if as_json:
+        print(json.dumps([asdict(o) for o in outcomes]))
+    else:
+        for o in outcomes:
+            print(_refresh_human(o))
+        refreshed = sum(1 for o in outcomes if o.refreshed)
+        stuck = [o for o in outcomes if o.refused or o.missing]
+        summary = f"refreshed {refreshed}"
+        if stuck:
+            summary += f" · {len(stuck)} not refreshed"
+        print(summary)
+
+    # A targeted single refresh that resolved nothing is an error (exit 1) so scripts
+    # notice; --all is a best-effort sweep and always exits 0.
+    if not all_ and outcomes and (outcomes[0].refused or outcomes[0].missing):
+        return 1
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     g = argparse.ArgumentParser(add_help=False)
     g.add_argument("--instance")
@@ -225,6 +284,25 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("table", nargs="?")
     push.add_argument("sys_id", nargs="?")
     push.add_argument("--all", action="store_true", dest="all_")
+
+    refresh = sub.add_parser(
+        "refresh", parents=[g],
+        help="rebase a record's .snapshot.json from the live instance",
+        description="Re-read the live record and rebase the matching scratch folder's "
+                    ".snapshot.json — regardless of the enclosing set's update-set state "
+                    "and without requiring that set to be current. Clears 'phantom "
+                    "dirty' folders (local matches the instance but the snapshot is "
+                    "stale) so prune can reap them, and satisfies push's 'refresh "
+                    "first' clobber-guard. Snapshot-only by default; refuses when the "
+                    "local files genuinely diverge from the instance unless "
+                    "--overwrite-local is given.")
+    refresh.add_argument("table", nargs="?", help="table name (omit with --all)")
+    refresh.add_argument("sys_id", nargs="?", help="record sys_id (omit with --all)")
+    refresh.add_argument("--all", action="store_true", dest="all_",
+                         help="refresh every record in every on-disk workspace")
+    refresh.add_argument("--overwrite-local", action="store_true", dest="overwrite_local",
+                         help="replace local field files with the instance copy when they "
+                              "diverge (discards the local edit)")
     return p
 
 
@@ -256,6 +334,9 @@ def dispatch(argv: list[str], *, client_factory=None) -> int:
             return cmd_status(client, scratch, as_json=aj)
         if args.cmd == "push":
             return cmd_push(client, scratch, args.table, args.sys_id, args.all_, as_json=aj)
+        if args.cmd == "refresh":
+            return cmd_refresh(client, scratch, args.table, args.sys_id,
+                               args.all_, args.overwrite_local, as_json=aj)
     except AuthExpiredError as e:
         return _fail(str(e), as_json=aj)
     return 2
