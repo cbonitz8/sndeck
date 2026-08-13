@@ -13,10 +13,11 @@ from .config import load_instance
 from .prune import reconcile_and_report
 from .push import push_all, push_one
 from .records import pull_record, set_workspace
-from .refresh import (_read_meta, all_record_folders, apply_refresh,
+from .refresh import (all_record_folders, apply_refresh,
                       find_record_folders, missing_outcome)
 from .rest import TableClient
 from .scratch import set_workspaces
+from .snapshot import read_meta
 from .settings import load_sndeck_config, resolve_instance, resolve_scratch
 from .state import load_state
 from .sync import is_dirty, local_field_changes
@@ -232,7 +233,7 @@ def cmd_refresh(client, scratch, table, sys_id, all_, overwrite_local, *,
 
     outcomes = []
     for folder in folders:
-        t, s, name = _read_meta(folder)
+        t, s, name = read_meta(folder)
         rec = client.get_record(t, s, display_value="false")
         if rec is None:
             outcomes.append(missing_outcome(folder, t, s, name))

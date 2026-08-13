@@ -5,13 +5,12 @@ is owned by .scratch — this module re-exports those names for existing
 importers and focuses on the network->disk pull."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
-from .registry import CODE_ARTIFACTS, field_extension
-from .sync import is_dirty
-from .scratch import (RECORD_JSON, SNAPSHOT_JSON, _SET_DIR, RecordRef, WorkspaceRef,
+from .registry import CODE_ARTIFACTS
+from . import snapshot
+from .snapshot import RECORD_JSON, SNAPSHOT_JSON, is_dirty
+from .scratch import (_SET_DIR, RecordRef, WorkspaceRef,
                       folder_name as _folder_name, set_dir_name, set_workspace,
                       scan_scratch, scan_workspace, delete_record_folders)
 
@@ -25,17 +24,15 @@ def pull_record(client, table: str, sys_id: str, scratch_dir) -> RecordRef:
     folder = Path(scratch_dir) / table / _folder_name(name, sys_id)
     folder.mkdir(parents=True, exist_ok=True)
 
-    fields = {k: v for k, v in rec.items() if not k.startswith("_")}
-    body = {"_meta": {"table": table, "sys_id": sys_id, "name": name,
-                      "pulled_at": datetime.now(timezone.utc).isoformat()}, **fields}
-    (folder / RECORD_JSON).write_text(json.dumps(body, indent=2), encoding="utf-8")
-    (folder / SNAPSHOT_JSON).write_text(json.dumps(fields, indent=2), encoding="utf-8")
+    fields = snapshot.instance_fields(rec)
+    snapshot.write_record_json(folder, table, sys_id, name, fields)
+    snapshot.write_snapshot(folder, fields)
 
     artifact = CODE_ARTIFACTS.get(table)
     if artifact:
         for f in artifact.script_fields:
             if f in fields and fields[f] not in (None, ""):
-                (folder / f"{f}{field_extension(f)}").write_text(str(fields[f]), encoding="utf-8")
+                (folder / snapshot.field_file(f)).write_text(str(fields[f]), encoding="utf-8")
 
     return RecordRef(table, sys_id, name, folder)
 

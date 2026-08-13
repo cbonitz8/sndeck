@@ -8,8 +8,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-RECORD_JSON = "record.json"
-SNAPSHOT_JSON = ".snapshot.json"
+# Snapshot owns the record.json / .snapshot.json filenames (their content shape lives
+# there); re-exported here so existing `from .scratch import RECORD_JSON` importers keep
+# working and scan_scratch can glob for them.
+from .snapshot import RECORD_JSON, SNAPSHOT_JSON
 
 _SANITIZE = re.compile(r"[^A-Za-z0-9_.\- ]")
 _SET_DIR = re.compile(r"__(?P<sysid>[0-9a-f]{32})$")
