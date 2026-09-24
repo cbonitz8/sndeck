@@ -1,4 +1,5 @@
 import json
+import os
 import httpx
 import pytest
 from sndeck.rest import TableClient
@@ -315,6 +316,19 @@ def test_dispatch_us_get_routes(tmp_path, capsys):
 def test_dispatch_us_ls_routes(tmp_path, capsys):
     rc = cli.dispatch(["us", "ls"], client_factory=lambda name: _client(_routes_two_sets))
     assert rc == 0
+
+
+def test_dispatch_us_ls_keeps_workspace_of_set_absent_from_response(tmp_path, capsys):
+    """Regression: `us ls` reconciles the resolved scratch. A set missing from a
+    non-empty state response is not proof it was deleted, so its clean workspace stays."""
+    scratch = os.environ["SNDECK_SCRATCH"]
+    sid = "9" * 32
+    _stage_record(scratch, sid, "Real Set", "sys_script_include", "a" * 32, "Thing",
+                  script="x", snapshot="x")
+    rc = cli.dispatch(["us", "ls"], client_factory=lambda name: _client(_routes_two_sets))
+    assert rc == 0
+    assert os.path.isdir(os.path.join(scratch, f"Real Set__{sid}"))
+    assert "not found on the instance" in capsys.readouterr().err
 
 
 def _routes_us_set(table, params):

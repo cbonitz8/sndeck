@@ -17,7 +17,8 @@ KEEP_STATE = "in progress"
 @dataclass(frozen=True)
 class PruneWarning:
     """A skip-and-keep decision, presentation-free. scope='set' → label is the set
-    slug, state is its update-set state, detail is the dirty record names.
+    slug, state is its update-set state (None = not found on the instance), detail is
+    the dirty record names.
     scope='orphan' → label is 'table/name', state is None, detail is ''."""
     scope: str            # "set" | "orphan"
     label: str
@@ -26,8 +27,9 @@ class PruneWarning:
 
 
 def plan_set_prune(root, set_states: dict[str, str]) -> tuple[list[Path], list[PruneWarning]]:
-    """For each on-disk set workspace not in 'in progress' (absent state = gone):
-    delete if every record is clean; else warn-and-keep. Returns (dirs, warnings)."""
+    """For each on-disk set workspace whose set is known and not 'in progress': delete
+    if every record is clean; else warn-and-keep. A set absent from set_states is
+    warned about and kept. Returns (dirs, warnings)."""
     dels: list[Path] = []
     warns: list[PruneWarning] = []
     workspaces = set_workspaces(root)
@@ -38,13 +40,18 @@ def plan_set_prune(root, set_states: dict[str, str]) -> tuple[list[Path], list[P
         # clean scratch in one pass. Skip set-pruning entirely for this call.
         return dels, warns
     for ws in workspaces:
-        state = set_states.get(ws.set_sys_id)          # None => gone/deleted
+        state = set_states.get(ws.set_sys_id)
         if state == KEEP_STATE:
+            continue
+        if state is None:
+            # Absent from a populated response is not proof the set was deleted (a
+            # partial or fake response looks identical), so never reap on absence.
+            warns.append(PruneWarning("set", ws.slug, None, ""))
             continue
         dirty = [r for r in ws.records if is_dirty(r.path)]
         if dirty:
             names = ", ".join(f"{r.table}/{r.name}" for r in dirty)
-            warns.append(PruneWarning("set", ws.slug, state or "gone", names))
+            warns.append(PruneWarning("set", ws.slug, state, names))
         else:
             dels.append(ws.dir)
     return dels, warns
@@ -87,6 +94,9 @@ def reconcile_scratch(client, root) -> PruneResult:
 
 def _render_warning(w: PruneWarning) -> str:
     """The only place the '⚠ ...' strings are built."""
+    if w.scope == "set" and w.state is None:
+        return (f"⚠ set '{w.label}' was not found on the instance — not pruned "
+                f"(delete the folder by hand if the set is gone)")
     if w.scope == "set":
         return (f"⚠ set '{w.label}' is {w.state} but has unpushed edits "
                 f"({w.detail}) — not pruned")

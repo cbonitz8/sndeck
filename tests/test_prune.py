@@ -44,15 +44,22 @@ def test_plan_keeps_in_progress_and_prunes_complete_clean(tmp_path):
     assert dels == [done] and warns == []
 
 
-def test_plan_prunes_gone_set(tmp_path):
+def test_plan_keeps_set_absent_from_a_populated_response(tmp_path):
+    """Absent from a non-empty state response is not proof of deletion (a partial or
+    fake response looks the same), so a clean workspace is warned about and kept."""
     sid = "c" + HEX[1:]
     d = _set_dir(tmp_path, "deleted upstream", sid); _make_record(d, "sys_script", "C", "333")
-    # states is non-empty (a real response, this set's sid just isn't in it) so the
-    # empty-states safety guard doesn't apply here -- absent-from-a-populated-map still
-    # means "gone".
     other_sid = "e" + HEX[1:]
-    dels, warns = plan_set_prune(tmp_path, {other_sid: "in progress"})  # sid absent = gone
-    assert dels == [d] and warns == []
+    dels, warns = plan_set_prune(tmp_path, {other_sid: "in progress"})
+    assert dels == []
+    assert warns == [PruneWarning("set", "deleted upstream", None, "")]
+
+
+def test_format_prune_report_renders_missing_set_warning():
+    r = PruneResult([], [], [PruneWarning("set", "deleted upstream", None, "")])
+    assert format_prune_report(r) == [
+        "⚠ set 'deleted upstream' was not found on the instance — not pruned "
+        "(delete the folder by hand if the set is gone)"]
 
 
 def test_plan_skips_pruning_when_states_query_returns_empty(tmp_path):
