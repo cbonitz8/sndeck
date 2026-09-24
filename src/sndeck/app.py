@@ -22,7 +22,7 @@ from .state import load_state
 from .sync import is_dirty
 from .theme import LATTE, MACCHIATO, THEMES, next_theme
 from .tree import (
-    FileNode, ScopeNode, SetNode, TableNode, TreeModel, build_tree, find_set,
+    FileNode, ScopeNode, SetNode, TableNode, TreeModel, build_tree,
 )
 from .updatesets import (
     list_update_sets, resolve_current_set, switch_current_set, update_set_meta,
@@ -899,17 +899,11 @@ class SndeckApp(App):
 
         self.push_screen(SwitchConfirmScreen(set_name), after)
 
-    def _scope_for_set(self, set_sys_id: str) -> str | None:
-        """Raw scope of the set with this sys_id in the current model, at any depth, so a
-        base/member/standalone set switches into its own scope. None if not found. Model
-        traversal lives in tree.find_set."""
-        found = find_set(self._last_model, set_sys_id)
-        return found[0].scope if found is not None else None
-
-    def _activate_or_switch(self, set_sys_id: str, set_name: str, scope: str) -> None:
+    def _activate_or_switch(self, set_sys_id: str, set_name: str) -> None:
         """Switch the current update set — nothing more. Points the chosen set's prefs
         at it (sys_update_set + its own scope pointer + the recents header, via
-        set_current_update_set) and aligns the active application scope to it.
+        set_current_update_set) and aligns the active application scope to the set's own
+        scope.
 
         Deliberately relationship-blind: a set's parent/child (batch) membership is a
         commit-time grouping in ServiceNow, not a 'current set' concept, so switching
@@ -917,16 +911,12 @@ class SndeckApp(App):
         batches lives in the push path (_do_push_all), which is the only place batch
         membership actually affects capture. The write itself lives in
         updatesets.switch_current_set — testable without Textual."""
-        switch_current_set(self._client, set_sys_id, scope)
+        switch_current_set(self._client, set_sys_id)
 
     @work(thread=True, exclusive=True, group="write")
     def _do_switch(self, set_sys_id: str, set_name: str) -> None:
         try:
-            # Look up the SetNode (top-level OR nested member) to get its scope, so a
-            # scoped member switches into its own scope. A not-found node degrades
-            # gracefully to scope="global".
-            scope = self._scope_for_set(set_sys_id) or "global"
-            self._activate_or_switch(set_sys_id, set_name, scope)
+            self._activate_or_switch(set_sys_id, set_name)
             self.call_from_thread(self.notify, f"Switched to '{set_name}'.",
                                   severity="information")
             model = build_tree(self._client, self._scratch, load_state().tracked_sets)
@@ -963,6 +953,9 @@ class SndeckApp(App):
             self.call_from_thread(self.notify, str(e), severity="error")
             return
         for o in outcomes:
+            if o.capture_error:
+                self.call_from_thread(self.notify, f"Miscaptured {o.name}: {o.capture_error}",
+                                      severity="error")
             if o.warning:
                 self.call_from_thread(self.notify, f"Warning: {o.warning}", severity="warning")
             elif o.routed_scope:

@@ -14,6 +14,12 @@ class TableClient:
         self.tokens = token_provider
         self._http = http or httpx.Client(timeout=30)
 
+    def reset_session(self) -> None:
+        """Start a fresh ServiceNow server session on the next request. A session reads
+        the user's prefs (apps.current_app, update set) once when it opens, so a pref
+        written mid-session is not seen by that session's later writes."""
+        self._http.cookies.clear()
+
     def _get(self, table: str, params: dict) -> list[dict]:
         url = f"{self.instance.url}/api/now/table/{table}"
         for attempt in (1, 2):

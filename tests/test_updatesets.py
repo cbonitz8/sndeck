@@ -59,7 +59,9 @@ def test_recent_captures_parses_display_values():
 def test_capture_for_record_queries_by_name_key():
     def routes(table, params):
         assert params.get("sysparm_query", "").startswith("name=sys_script_3a4f")
-        assert "ORDERBYDESCsys_created_on" in params.get("sysparm_query", "")
+        # A re-capture into a set that already holds the record updates that row in place
+        # (sys_created_on stays old), so "newest" must be by sys_recorded_at.
+        assert "ORDERBYDESCsys_recorded_at" in params.get("sysparm_query", "")
         return [{
             "sys_created_on": {"value": "2026-07-04 14:30:00", "display_value": "..."},
             "type": {"value": "sys_script", "display_value": "Business Rule"},
@@ -448,18 +450,57 @@ def test_resolve_current_set_user_but_no_set():
     assert user is not None and cur is None
 
 
-def test_switch_current_set_writes_pointer_and_scope():
+def test_switch_current_set_aligns_app_to_the_sets_own_scope():
+    """The CLI `us set` and the TUI both route through switch_current_set, so neither
+    can leave apps.current_app on another scope (the push miscapture root cause)."""
     from sndeck.updatesets import switch_current_set
-    writes = []
-    def routes(table, params):
+    posts = []
+
+    def handler(req):
+        table = str(req.url.path).rsplit("/", 1)[-1]
+        if req.method == "POST":
+            posts.append(json.loads(req.content))
+            return httpx.Response(201, json={"result": {}})
         if table == "sys_user":
-            return [{"sys_id": "U1", "user_name": "cbonitz"}]
-        if table == "sys_update_set":
-            return [{"name": "hotfix", "application": {"value": "x_scope", "display_value": "App"}}]
-        return []   # no existing prefs -> POSTs
-    # switch_current_set returns True when the user resolves; the write path is exercised
-    # against the mock transport (POST/PATCH accepted).
-    assert switch_current_set(_client(routes), "SET1", "x_scope") is True
+            rows = [{"sys_id": "U1", "user_name": "cbonitz"}]
+        elif table == "sys_update_set":
+            rows = [{"name": {"value": "hotfix", "display_value": "hotfix"},
+                     "application": {"value": "SCOPE9", "display_value": "App"}}]
+        else:
+            rows = []
+        return httpx.Response(200, json={"result": rows})
+    client = TableClient(INST, FakeToken(),
+                         http=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert switch_current_set(client, "SET1") is True
+    by_name = {b["name"]: b["value"] for b in posts}
+    assert by_name["sys_update_set"] == "SET1"
+    assert by_name["updateSetForScopeSCOPE9"] == "SET1"
+    assert by_name["apps.current_app"] == "SCOPE9"
+
+
+def test_set_current_update_set_returns_scope_id():
+    from sndeck.updatesets import set_current_update_set
+
+    class C:
+        def query(self, table, *, query="", **kw):
+            if table == "sys_update_set":
+                return [{"name": {"value": "x", "display_value": "x"},
+                         "application": {"value": "SCOPE9", "display_value": "App"}}]
+            return []
+        def post(self, table, body): return {}
+    assert set_current_update_set(C(), "U1", "SET9") == "SCOPE9"
+
+
+def test_set_current_update_set_missing_set_raises_and_writes_nothing():
+    from sndeck.updatesets import set_current_update_set
+
+    class C:
+        def query(self, table, **kw): return []
+        def post(self, *a, **k): raise AssertionError("must not write for an unknown set")
+        def patch(self, *a, **k): raise AssertionError("must not write for an unknown set")
+    import pytest
+    with pytest.raises(LookupError):
+        set_current_update_set(C(), "U1", "NOPE")
 
 
 def test_switch_current_set_false_without_user():

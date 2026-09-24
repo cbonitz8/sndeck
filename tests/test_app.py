@@ -1459,29 +1459,15 @@ def test_switch_is_relationship_blind(app, monkeypatch):
     monkeypatch.setattr("sndeck.updatesets.current_user",
                         lambda c: type("U", (), {"sys_id": "u", "user_name": "cb"})())
     monkeypatch.setattr("sndeck.updatesets.set_current_update_set",
-                        lambda c, u, sid: calls.setdefault("switched", sid))
+                        lambda c, u, sid: calls.setdefault("switched", sid) and "x_scope")
     scope_calls = []
     monkeypatch.setattr("sndeck.updatesets.set_current_application",
                         lambda c, u, scope: scope_calls.append(scope))
-    app._activate_or_switch(set_sys_id="6"*32, set_name="scaffold", scope="x_scope")
+    app._activate_or_switch(set_sys_id="6"*32, set_name="scaffold")
     assert calls.get("switched") == "6"*32
     assert scope_calls == ["x_scope"], "must align the active scope to the chosen set's scope"
     # activate_batch no longer exists — switching is a two-call operation, nothing more.
     assert not hasattr(__import__("sndeck.app", fromlist=["x"]), "activate_batch")
-
-
-def test_scope_for_set_resolves_nested_member(app):
-    """_do_switch resolves scope via _scope_for_set, which must find a set at ANY
-    depth (top-level or nested batch member) so a scoped member switches into its
-    own scope, not a global fallback."""
-    member = SetNode(sys_id="C"*32, name="child", state="in progress", is_current=False,
-                     tables=[], scope="x_child", is_base=False, members=[])
-    base = SetNode(sys_id="B"*32, name="base", state="in progress", is_current=True,
-                   tables=[], scope="global", is_base=True, members=[member])
-    app._last_model = TreeModel([ScopeNode("G", [base])], current_set=None)
-    assert app._scope_for_set("C"*32) == "x_child"
-    assert app._scope_for_set("B"*32) == "global"
-    assert app._scope_for_set("Z"*32) is None
 
 
 @pytest.mark.asyncio

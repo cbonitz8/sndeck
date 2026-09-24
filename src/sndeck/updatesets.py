@@ -91,7 +91,9 @@ def records_in_update_set(client, set_sys_id: str) -> list[tuple[str, str]]:
 def capture_for_record(client, table: str, sys_id: str) -> Capture | None:
     # NB: assumes the sys_update_xml update name is "<table>_<sys_id>" — holds for the
     # v1 code-artifact registry; verify per new table when the registry grows.
-    q = f"name={table}_{sys_id}^ORDERBYDESCsys_created_on"
+    # Order by sys_recorded_at: a re-capture into a set that already holds the record
+    # updates that row in place, leaving sys_created_on at the first capture.
+    q = f"name={table}_{sys_id}^ORDERBYDESCsys_recorded_at"
     rows = client.query("sys_update_xml", query=q,
                         fields=["sys_created_on", "type", "target_name", "update_set"],
                         display_value="all", limit=1)
@@ -276,7 +278,7 @@ def _write_recent_items(client, user_sys_id: str, set_sys_id: str, display_name:
                     {"name": _RECENT_ITEMS_PREF, "user": user_sys_id, "value": value})
 
 
-def set_current_update_set(client, user_sys_id: str, set_sys_id: str) -> None:
+def set_current_update_set(client, user_sys_id: str, set_sys_id: str) -> str:
     """Switch the current update set for the given user via sys_user_preference.
 
     Writes all three things the ServiceNow UI maintains so REST capture and the picker
@@ -287,17 +289,21 @@ def set_current_update_set(client, user_sys_id: str, set_sys_id: str) -> None:
       - `glide.ui.concourse_picker.recent_items` — the recents list whose front entry
         is the label the header picker displays.
     Pointer prefs are PATCHed if present, else POSTed. Attribution is the token owner —
-    no explicit user override is added.
+    no explicit user override is added. Returns the set's raw scope id ('global' for
+    Global); raises LookupError, writing nothing, if the set does not exist.
     """
     rows = client.query("sys_update_set", query=f"sys_id={set_sys_id}",
                         fields=["name", "application"], display_value="all", limit=1)
-    row = rows[0] if rows else {}
+    if not rows:
+        raise LookupError(f"update set {set_sys_id} not found")
+    row = rows[0]
     scope_id = _raw(row, "application") or "global"
     scope_name = _dv(row, "application") or "Global"
     set_name = _dv(row, "name") or _raw(row, "name") or set_sys_id
     _upsert_pref(client, user_sys_id, "sys_update_set", set_sys_id)
     _upsert_pref(client, user_sys_id, f"updateSetForScope{scope_id}", set_sys_id)
     _write_recent_items(client, user_sys_id, set_sys_id, f"{set_name} [{scope_name}]")
+    return scope_id
 
 
 def list_update_sets(client, *, state: str = "in progress", offset: int = 0,
@@ -350,9 +356,11 @@ def set_current_application(client, user_sys_id: str, scope_id: str) -> None:
     _upsert_pref(client, user_sys_id, "apps.current_app", scope_id)
 
 
-def switch_current_set(client, set_sys_id: str, scope: str = "global") -> bool:
-    """Switch the current update set and align the active application scope to it.
+def switch_current_set(client, set_sys_id: str) -> bool:
+    """Switch the current update set and align apps.current_app to the set's own scope.
     Returns False if the token user can't be resolved (nothing written), else True.
+    The one switch path for both the CLI `us set` and the TUI: a set pointer left
+    disagreeing with apps.current_app makes the next push capture into the wrong set.
 
     Deliberately relationship-blind: a set's parent/child (batch) membership is a
     commit-time grouping in ServiceNow, not a 'current set' concept, so switching only
@@ -362,7 +370,7 @@ def switch_current_set(client, set_sys_id: str, scope: str = "global") -> bool:
     user = current_user(client)
     if user is None:
         return False
-    set_current_update_set(client, user.sys_id, set_sys_id)
+    scope = set_current_update_set(client, user.sys_id, set_sys_id)
     set_current_application(client, user.sys_id, scope)
     return True
 

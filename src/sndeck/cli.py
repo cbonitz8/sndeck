@@ -22,8 +22,8 @@ from .settings import load_sndeck_config, resolve_instance, resolve_scratch
 from .state import load_state
 from .sync import is_dirty, local_field_changes
 from .tree import build_tree, find_set
-from .updatesets import (current_user, list_update_sets, resolve_current_set,
-                         set_current_update_set, update_set_meta)
+from .updatesets import (list_update_sets, resolve_current_set, switch_current_set,
+                         update_set_meta)
 
 
 def _emit(human: str, obj, as_json: bool) -> None:
@@ -74,10 +74,8 @@ def cmd_us_set(client, sys_id: str, *, as_json: bool) -> int:
     meta = update_set_meta(client, sys_id)
     if meta is None:
         return _fail(f"update set {sys_id} not found", as_json=as_json)
-    user = current_user(client)
-    if user is None:
+    if not switch_current_set(client, sys_id):
         return _fail("could not resolve current ServiceNow user", as_json=as_json)
-    set_current_update_set(client, user.sys_id, sys_id)
     obj = {"sys_id": meta.sys_id, "name": meta.name, "state": meta.state, "scope": meta.scope}
     _emit(f"Switched to {meta.name} [{meta.scope}]", obj, as_json)
     return 0
@@ -192,7 +190,12 @@ def cmd_push(client, scratch, table, sys_id, all_: bool, *, as_json: bool) -> in
     if skipped:
         human += f" · skipped {len(skipped)} ({', '.join(o.name for o in skipped)})"
     _emit(human, [asdict(o) for o in outcomes], as_json)
-    return 0
+    for o in outcomes:
+        if o.warning:
+            print(f"warning: {o.warning}", file=sys.stderr)
+        if o.capture_error:
+            print(f"MISCAPTURED {o.table}/{o.name}: {o.capture_error}", file=sys.stderr)
+    return 1 if any(o.capture_error for o in outcomes) else 0
 
 
 def _refresh_human(o) -> str:

@@ -139,3 +139,19 @@ def test_write_persistent_401_raises():
     c = TableClient(INST, FakeToken(["A", "B"]), http=httpx.Client(transport=httpx.MockTransport(handler)))
     with pytest.raises(AuthExpiredError):
         c.post("sys_user_preference", {"x": "y"})
+
+
+def test_reset_session_drops_server_session_cookie():
+    seen = []
+
+    def handler(req):
+        seen.append(req.headers.get("cookie"))
+        return httpx.Response(200, json={"result": []},
+                              headers={"set-cookie": "JSESSIONID=S1; Path=/"})
+    c = TableClient(INST, FakeToken(["AT"] * 3),
+                    http=httpx.Client(transport=httpx.MockTransport(handler)))
+    c.query("sys_user")
+    c.query("sys_user")
+    c.reset_session()
+    c.query("sys_user")
+    assert seen == [None, "JSESSIONID=S1", None]

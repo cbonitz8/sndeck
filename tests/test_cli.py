@@ -5,6 +5,7 @@ import pytest
 from sndeck.rest import TableClient
 from sndeck.config import Instance
 from sndeck import cli
+from sndeck.updatesets import Capture
 
 _INST = Instance("dev", "https://x.service-now.com", "cid",
                  "https://x.service-now.com/oauth_token.do", "cbonitz@x")
@@ -127,15 +128,15 @@ def test_us_set_switches(capsys):
         return []
 
     import sndeck.cli as climod
-    orig = climod.set_current_update_set
-    climod.set_current_update_set = lambda c, u, sid: calls.setdefault("args", (u, sid))
+    orig = climod.switch_current_set
+    climod.switch_current_set = lambda c, sid: calls.setdefault("args", sid) and True
     try:
         rc = climod.cmd_us_set(_client(routes), "S1", as_json=True)
     finally:
-        climod.set_current_update_set = orig
+        climod.switch_current_set = orig
     obj = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert calls["args"] == ("U1", "S1")
+    assert calls["args"] == "S1"
     assert obj["sys_id"] == "S1" and obj["name"] == "Alpha"
 
 
@@ -268,12 +269,40 @@ def test_push_single_dirty(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("sndeck.push.set_scope_pointer", lambda *a, **k: None)
     monkeypatch.setattr("sndeck.push.set_current_application", lambda *a, **k: None)
 
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: Capture("t", "Script Include", "Thing", "My Set", sid))
+
     rc = cli.cmd_push(_client(routes), str(tmp_path), "sys_script_include", rec,
                       False, as_json=True)
     obj = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert pushed == [rec]
     assert obj[0]["pushed"] is True
+    assert obj[0]["capture_error"] is None
+
+
+def test_push_miscapture_fails_loudly(tmp_path, capsys, monkeypatch):
+    sid = "1" * 32
+    rec = "a" * 32
+    _stage_record(str(tmp_path), sid, "My Set", "sys_script_include", rec, "Thing",
+                  script="EDITED", snapshot="x")
+    routes = _routes_status(sid, "sys_script_include", rec, "My Set")
+    monkeypatch.setattr("sndeck.push.build_push_plan",
+                        lambda c, path: __import__("sndeck.sync", fromlist=["PushPlan"])
+                        .PushPlan("sys_script_include", rec, "Thing", [], [], False))
+    monkeypatch.setattr("sndeck.push.apply_push", lambda c, plan: None)
+    monkeypatch.setattr("sndeck.push.pull_record", lambda *a, **k: None)
+    monkeypatch.setattr("sndeck.push.set_scope_pointer", lambda *a, **k: None)
+    monkeypatch.setattr("sndeck.push.set_current_application", lambda *a, **k: None)
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: Capture("t", "Script Include", "Thing",
+                                                "Stray Global", "G" * 32))
+
+    rc = cli.cmd_push(_client(routes), str(tmp_path), "sys_script_include", rec,
+                      False, as_json=False)
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "Stray Global" in out.err and "G" * 32 in out.err
 
 
 def test_push_not_staged(tmp_path, capsys):
@@ -345,13 +374,13 @@ def _routes_us_set(table, params):
 
 def test_dispatch_us_set_routes(tmp_path, capsys, monkeypatch):
     import sndeck.cli as climod
-    orig = climod.set_current_update_set
-    climod.set_current_update_set = lambda c, u, sid: None
+    orig = climod.switch_current_set
+    climod.switch_current_set = lambda c, sid: True
     try:
         rc = cli.dispatch(["us", "set", "S1"],
                           client_factory=lambda name: _client(_routes_us_set))
     finally:
-        climod.set_current_update_set = orig
+        climod.switch_current_set = orig
     assert rc == 0
 
 
@@ -359,7 +388,7 @@ def test_dispatch_instance_flag_reaches_factory(capsys, monkeypatch):
     """--instance flag overrides resolution and is passed to client_factory."""
     import sndeck.cli as climod
     recorded = {}
-    monkeypatch.setattr(climod, "set_current_update_set", lambda c, u, sid: None)
+    monkeypatch.setattr(climod, "switch_current_set", lambda c, sid: True)
 
     def capture(name):
         recorded["name"] = name

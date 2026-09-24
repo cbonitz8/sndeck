@@ -89,6 +89,9 @@ def test_push_all_routes_same_scope_members_to_own_sets(monkeypatch):
                         lambda c, u, scope: align_calls.append(scope))
     monkeypatch.setattr("sndeck.push.set_scope_pointer",
                         lambda c, u, scope, sid: pointer_calls.append((scope, sid)))
+    owners = {a: "P" * 32, b: "M" * 32}
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap(owners[s], "owner"))
 
     outcomes = push_all(client, model, ["/tmp/a", "/tmp/b"])
 
@@ -119,3 +122,118 @@ def test_push_one_reports_failure_reason(monkeypatch):
     assert outcome.pushed is False
     assert "instance changed" in outcome.reason
     assert outcome.name == "A"
+
+
+def _scoped_model():
+    a = "a" * 32
+    f = FileNode("sys_script", a, "A", in_current_set=True, tracked=True,
+                 local=True, dirty=True, record_path=Path("/tmp/a"))
+    s = SetNode(sys_id="S" * 32, name="scoped set", state="in progress", is_current=True,
+                tables=[TableNode("sys_script", "Business Rules", [f])],
+                scope="SCOPE9", is_base=True, members=[])
+    return TreeModel([ScopeNode("App", [s])], current_set=None), a
+
+
+def _stub_push(monkeypatch, a, events):
+    monkeypatch.setattr("sndeck.push.build_push_plan",
+                        lambda c, path: PushPlan("sys_script", a, "A", [], [], False))
+    monkeypatch.setattr("sndeck.push.apply_push", lambda c, plan: events.append("put"))
+    monkeypatch.setattr("sndeck.push.pull_record", lambda *a, **k: None)
+    monkeypatch.setattr("sndeck.push.set_scope_pointer", lambda *a, **k: None)
+    monkeypatch.setattr("sndeck.push.set_current_application",
+                        lambda c, u, scope: events.append(f"app:{scope}"))
+
+
+def _cap(set_id, set_name):
+    from sndeck.updatesets import Capture
+    return Capture("t", "Business Rule", "A", set_name, set_id)
+
+
+def _user_routes(app_pref):
+    def routes(table, params):
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cbonitz"}]
+        if table == "sys_user_preference":
+            return [{"value": app_pref}]
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": "G" * 32}, "name": {"value": "global set",
+                     "display_value": "global set"}, "state": {"value": "in progress"},
+                     "application": {"value": "global", "display_value": "Global"}}]
+        return []
+    return routes
+
+
+def test_push_all_resets_server_session_after_changing_app(monkeypatch):
+    """The open SN session keeps the scope it started in; a PUT in that session after
+    PATCHing apps.current_app captures into the old scope's set."""
+    model, a = _scoped_model()
+    events = []
+    client = _client(_user_routes("global"))
+    monkeypatch.setattr(client, "reset_session", lambda: events.append("reset"))
+    _stub_push(monkeypatch, a, events)
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("S" * 32, "scoped set"))
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert events == ["app:SCOPE9", "reset", "put"]
+    assert o.pushed and o.routed_scope == "SCOPE9" and o.capture_error is None
+
+
+def test_push_all_keeps_session_when_app_already_aligned(monkeypatch):
+    model, a = _scoped_model()
+    events = []
+    client = _client(_user_routes("SCOPE9"))
+    monkeypatch.setattr(client, "reset_session", lambda: events.append("reset"))
+    _stub_push(monkeypatch, a, events)
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("S" * 32, "scoped set"))
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert events == ["put"]
+    assert o.capture_error is None
+
+
+def test_push_all_reports_miscapture_naming_both_sets(monkeypatch):
+    model, a = _scoped_model()
+    client = _client(_user_routes("SCOPE9"))
+    _stub_push(monkeypatch, a, [])
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("G" * 32, "global set"))
+    monkeypatch.setattr("sndeck.push.update_set_meta",
+                        lambda c, sid: type("M", (), {"name": "scoped set"})())
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert o.pushed is True
+    assert "global set" in o.capture_error and "G" * 32 in o.capture_error
+    assert "scoped set" in o.capture_error and "S" * 32 in o.capture_error
+
+
+def test_push_all_reports_missing_capture(monkeypatch):
+    model, a = _scoped_model()
+    client = _client(_user_routes("SCOPE9"))
+    _stub_push(monkeypatch, a, [])
+    monkeypatch.setattr("sndeck.push.capture_for_record", lambda c, t, s: None)
+    monkeypatch.setattr("sndeck.push.update_set_meta",
+                        lambda c, sid: type("M", (), {"name": "scoped set"})())
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert o.pushed is True
+    assert "no sys_update_xml" in o.capture_error and "scoped set" in o.capture_error
+
+
+def test_push_all_unstaged_record_verifies_against_current_set(monkeypatch):
+    """No owning set in the model: the intended set is the sys_update_set pref."""
+    model = TreeModel([], current_set=None)
+    a = "a" * 32
+    client = _client(_user_routes("CUR" + "x" * 29))
+    _stub_push(monkeypatch, a, [])
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("CUR" + "x" * 29, "current"))
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert o.pushed is True and o.capture_error is None
