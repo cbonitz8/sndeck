@@ -33,3 +33,10 @@ def test_field_extension_maps_by_name():
     assert field_extension("script") == ".js"
     assert field_extension("option_schema") == ".json"
     assert field_extension("unknown_field") == ".txt"
+
+
+def test_transform_map_and_script_extract_script_field():
+    for t in ("sys_transform_map", "sys_transform_script"):
+        art = CODE_ARTIFACTS[t]
+        assert art.script_fields == ("script",)
+        assert art.folder_record is False

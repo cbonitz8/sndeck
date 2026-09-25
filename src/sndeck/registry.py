@@ -27,6 +27,8 @@ CODE_ARTIFACTS: dict[str, ArtifactType] = dict([
        folder=True),
     _t("sp_ng_template", ["template"]),
     _t("sp_angular_provider", ["script"]),
+    _t("sys_transform_map", ["script"]),
+    _t("sys_transform_script", ["script"]),
     _t("sp_header_footer", ["template", "css", "client_script", "script", "link"], folder=True),
     _t("sys_ui_page", ["html", "client_script", "processing_script"], folder=True),
 ])
