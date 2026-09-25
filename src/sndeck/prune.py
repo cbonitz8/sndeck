@@ -92,25 +92,36 @@ def reconcile_scratch(client, root) -> PruneResult:
     return PruneResult(set_dels, orph_dels, set_warns + orph_warns)
 
 
+def _render_missing(labels: list[str], instance: str) -> str:
+    # Update sets are never deleted, only ignored, so a missing set means the reply
+    # was wrong for this scratch dir, not that the set is gone.
+    if len(labels) == 1:
+        return (f"⚠ set '{labels[0]}' not found on {instance} — kept "
+                f"(wrong instance, or no read access to the set)")
+    return (f"⚠ {len(labels)} sets not found on {instance} — kept (wrong instance, "
+            f"or no read access to the sets): {', '.join(labels)}")
+
+
 def _render_warning(w: PruneWarning) -> str:
-    """The only place the '⚠ ...' strings are built."""
-    if w.scope == "set" and w.state is None:
-        return (f"⚠ set '{w.label}' was not found on the instance — not pruned "
-                f"(delete the folder by hand if the set is gone)")
+    """The only place the per-item '⚠ ...' strings are built."""
     if w.scope == "set":
         return (f"⚠ set '{w.label}' is {w.state} but has unpushed edits "
                 f"({w.detail}) — not pruned")
     return f"⚠ orphan {w.label} has unpushed edits — not pruned"
 
 
-def format_prune_report(result: PruneResult) -> list[str]:
+def format_prune_report(result: PruneResult, instance: str) -> list[str]:
     lines: list[str] = []
     if result.pruned_sets:
         names = ", ".join(p.name.rsplit("__", 1)[0] for p in result.pruned_sets)
         lines.append(f"pruned {len(result.pruned_sets)} shipped set workspace(s): {names}")
     if result.pruned_orphans:
         lines.append(f"pruned {len(result.pruned_orphans)} orphaned record folder(s)")
-    lines.extend(_render_warning(w) for w in result.warnings)
+    missing = [w.label for w in result.warnings if w.scope == "set" and w.state is None]
+    if missing:
+        lines.append(_render_missing(missing, instance))
+    lines.extend(_render_warning(w) for w in result.warnings
+                 if not (w.scope == "set" and w.state is None))
     return lines
 
 
@@ -119,6 +130,6 @@ def reconcile_and_report(client, root) -> list[str]:
     single best-effort contract shared by cli._run_reconcile and
     app._reconcile_scratch_once."""
     try:
-        return format_prune_report(reconcile_scratch(client, root))
+        return format_prune_report(reconcile_scratch(client, root), client.instance.name)
     except Exception:
         return []

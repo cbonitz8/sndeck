@@ -357,7 +357,7 @@ def test_dispatch_us_ls_keeps_workspace_of_set_absent_from_response(tmp_path, ca
     rc = cli.dispatch(["us", "ls"], client_factory=lambda name: _client(_routes_two_sets))
     assert rc == 0
     assert os.path.isdir(os.path.join(scratch, f"Real Set__{sid}"))
-    assert "not found on the instance" in capsys.readouterr().err
+    assert "not found on dev" in capsys.readouterr().err
 
 
 def _routes_us_set(table, params):

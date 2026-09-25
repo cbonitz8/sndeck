@@ -57,9 +57,20 @@ def test_plan_keeps_set_absent_from_a_populated_response(tmp_path):
 
 def test_format_prune_report_renders_missing_set_warning():
     r = PruneResult([], [], [PruneWarning("set", "deleted upstream", None, "")])
-    assert format_prune_report(r) == [
-        "⚠ set 'deleted upstream' was not found on the instance — not pruned "
-        "(delete the folder by hand if the set is gone)"]
+    assert format_prune_report(r, "dev") == [
+        "⚠ set 'deleted upstream' not found on dev — kept "
+        "(wrong instance, or no read access to the set)"]
+
+
+def test_format_prune_report_folds_missing_sets_into_one_line():
+    """A wrong-instance run makes every workspace look missing: one line, not one each."""
+    r = PruneResult([], [], [PruneWarning("set", "alpha", None, ""),
+                             PruneWarning("set", "beta", None, ""),
+                             PruneWarning("set", "z", "complete", "a/b")])
+    assert format_prune_report(r, "prod") == [
+        "⚠ 2 sets not found on prod — kept (wrong instance, or no read access to "
+        "the sets): alpha, beta",
+        "⚠ set 'z' is complete but has unpushed edits (a/b) — not pruned"]
 
 
 def test_plan_skips_pruning_when_states_query_returns_empty(tmp_path):
@@ -178,7 +189,7 @@ def test_reconcile_deletes_shipped_and_orphans_keeps_live_and_dirty(tmp_path):
 def test_reconcile_empty_when_no_scratch(tmp_path):
     result = reconcile_scratch(_client({}), tmp_path)
     assert result == PruneResult([], [], [])
-    assert format_prune_report(result) == []
+    assert format_prune_report(result, "dev") == []
 
 
 def test_format_report_lists_counts_and_warnings():
@@ -187,7 +198,7 @@ def test_format_report_lists_counts_and_warnings():
         pruned_orphans=[Path("/s/sp_widget/O__y")],
         warnings=[PruneWarning("set", "z", "complete", "a/b")],
     )
-    lines = format_prune_report(r)
+    lines = format_prune_report(r, "dev")
     assert any("shipped" in ln and "1" in ln for ln in lines)
     assert any("orphan" in ln.lower() and "1" in ln for ln in lines)
     assert "⚠ set 'z' is complete but has unpushed edits (a/b) — not pruned" in lines
@@ -196,5 +207,5 @@ def test_format_report_lists_counts_and_warnings():
 def test_format_prune_report_renders_warning_string():
     from sndeck.prune import PruneResult, PruneWarning, format_prune_report
     r = PruneResult([], [], [PruneWarning("set", "shipped but edited", "complete", "sys_script/Dirty")])
-    lines = format_prune_report(r)
+    lines = format_prune_report(r, "dev")
     assert "⚠ set 'shipped but edited' is complete but has unpushed edits (sys_script/Dirty) — not pruned" in lines
