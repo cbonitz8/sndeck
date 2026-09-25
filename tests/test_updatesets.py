@@ -414,6 +414,24 @@ def test_set_scope_pointer_upserts_only_the_scope_pointer():
         {"name": f"updateSetForScope{scope}", "user": "u1", "value": member})]
 
 
+def test_set_scope_pointer_reports_change_and_skips_same_value():
+    """push_all resets the server session only when the pointer actually moved, so
+    set_scope_pointer must say whether it did — and a no-op must not write."""
+    scope, target = "55de", "c"*32
+    q = f"name=updateSetForScope{scope}^user=u1"
+    same = _RecordingClient({q: [{"sys_id": "P1", "value": target}]})
+    assert set_scope_pointer(same, "u1", scope, target) is False
+    assert same.patched == [] and same.posted == []
+
+    moved = _RecordingClient({q: [{"sys_id": "P1", "value": "d"*32}]})
+    assert set_scope_pointer(moved, "u1", scope, target) is True
+    assert moved.patched == [("sys_user_preference", "P1", {"value": target})]
+
+    absent = _RecordingClient({q: []})
+    assert set_scope_pointer(absent, "u1", scope, target) is True
+    assert len(absent.posted) == 1
+
+
 def test_set_scope_pointer_defaults_empty_scope_to_global():
     base = "5"*32
     c = _RecordingClient({"name=updateSetForScopeglobal^user=u1": []})

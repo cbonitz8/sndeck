@@ -58,8 +58,9 @@ def verify_capture(client, table: str, sys_id: str, intended: str | None) -> str
 
 def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
     """Push every staged record path. Per-record: build plan, route the record's scope
-    pointer to its owning batch member, align the active scope only when it changes
-    (then start a fresh server session so the PUT sees it), apply, verify the capture
+    pointer to its owning batch member, align the active scope only when it changes,
+    start a fresh server session if either pref moved (an open session keeps the prefs
+    it read at open, so its PUT would capture by the old ones), apply, verify the capture
     landed in the intended set, then re-pull to refresh the snapshot. A failed record
     becomes a not-pushed outcome and the rest still push; a miscapture is a pushed
     outcome carrying capture_error. AuthExpiredError propagates (never swallowed)."""
@@ -78,12 +79,13 @@ def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
                     owner = set_for_record(model, plan.table, plan.sys_id)
                     if owner is not None:
                         rec_scope, intended = owner
-                        set_scope_pointer(client, user.sys_id, rec_scope, intended)
+                        moved = set_scope_pointer(client, user.sys_id, rec_scope, intended)
                         if rec_scope != aligned:
                             set_current_application(client, user.sys_id, rec_scope)
-                            client.reset_session()
                             routed = rec_scope
                             aligned = rec_scope
+                        if moved or routed:
+                            client.reset_session()
                     else:
                         intended = read_pref(client, user.sys_id, "sys_update_set")
                 except AuthExpiredError:

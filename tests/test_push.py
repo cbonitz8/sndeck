@@ -237,3 +237,38 @@ def test_push_all_unstaged_record_verifies_against_current_set(monkeypatch):
     [o] = push_all(client, model, ["/tmp/a"])
 
     assert o.pushed is True and o.capture_error is None
+
+
+def test_push_all_resets_session_when_only_the_scope_pointer_moves(monkeypatch):
+    """App already aligned, but the per-scope pointer moved: the open session would
+    still route by the pointer it read at open, so the PUT needs a fresh session."""
+    model, a = _scoped_model()
+    events = []
+    client = _client(_user_routes("SCOPE9"))
+    monkeypatch.setattr(client, "reset_session", lambda: events.append("reset"))
+    _stub_push(monkeypatch, a, events)
+    monkeypatch.setattr("sndeck.push.set_scope_pointer",
+                        lambda c, u, scope, sid: events.append("pointer") or True)
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("S" * 32, "scoped set"))
+
+    [o] = push_all(client, model, ["/tmp/a"])
+
+    assert events == ["pointer", "reset", "put"]
+    assert o.routed_scope is None and o.capture_error is None
+
+
+def test_push_all_resets_once_when_pointer_and_app_both_move(monkeypatch):
+    model, a = _scoped_model()
+    events = []
+    client = _client(_user_routes("global"))
+    monkeypatch.setattr(client, "reset_session", lambda: events.append("reset"))
+    _stub_push(monkeypatch, a, events)
+    monkeypatch.setattr("sndeck.push.set_scope_pointer",
+                        lambda c, u, scope, sid: events.append("pointer") or True)
+    monkeypatch.setattr("sndeck.push.capture_for_record",
+                        lambda c, t, s: _cap("S" * 32, "scoped set"))
+
+    push_all(client, model, ["/tmp/a"])
+
+    assert events == ["pointer", "app:SCOPE9", "reset", "put"]

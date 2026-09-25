@@ -215,16 +215,20 @@ def read_pref(client, user_sys_id: str, name: str) -> str | None:
     return prefs[0].get("value") if prefs else None
 
 
-def _upsert_pref(client, user_sys_id: str, name: str, value: str) -> None:
-    """PATCH the user's preference of this name if it exists, else POST a new one."""
+def _upsert_pref(client, user_sys_id: str, name: str, value: str) -> bool:
+    """PATCH the user's preference of this name if it exists, else POST a new one.
+    Writes nothing when it already holds value. Returns whether the value changed."""
     prefs = client.query("sys_user_preference",
                          query=f"name={name}^user={user_sys_id}",
-                         fields=["sys_id"], limit=1)
+                         fields=["sys_id", "value"], limit=1)
+    if prefs and prefs[0].get("value") == value:
+        return False
     if prefs:
         client.patch("sys_user_preference", prefs[0]["sys_id"], {"value": value})
     else:
         client.post("sys_user_preference",
                     {"name": name, "user": user_sys_id, "value": value})
+    return True
 
 
 _RECENT_ITEMS_PREF = "glide.ui.concourse_picker.recent_items"
@@ -375,7 +379,7 @@ def switch_current_set(client, set_sys_id: str) -> bool:
     return True
 
 
-def set_scope_pointer(client, user_sys_id: str, scope_id: str, set_sys_id: str) -> None:
+def set_scope_pointer(client, user_sys_id: str, scope_id: str, set_sys_id: str) -> bool:
     """Point ONE scope's current-update-set pointer at set_sys_id, without touching
     sys_update_set or the header recents.
 
@@ -385,5 +389,7 @@ def set_scope_pointer(client, user_sys_id: str, scope_id: str, set_sys_id: str) 
     record's scope — this is the ONLY place batch membership legitimately affects
     capture. 'Switching' the current set (set_current_update_set) stays deliberately
     relationship-blind; a batch is only a commit-time grouping, not a current-set
-    concept, so there is no 'activate the whole batch' operation."""
-    _upsert_pref(client, user_sys_id, f"updateSetForScope{scope_id or 'global'}", set_sys_id)
+    concept, so there is no 'activate the whole batch' operation. Returns whether the
+    pointer moved."""
+    return _upsert_pref(client, user_sys_id, f"updateSetForScope{scope_id or 'global'}",
+                        set_sys_id)

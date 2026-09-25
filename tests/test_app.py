@@ -282,7 +282,9 @@ async def test_switch_set_writes_only_on_confirm(tmp_path, sn_client, monkeypatc
     writes = []
     def routes(table, params):
         if table == "sys_user_preference" and params.get("sysparm_query", "").startswith("name=sys_update_set^user"):
-            return [{"sys_id": "PREF1", "value": "SET1"}]
+            # pointer currently elsewhere, so the switch is a real change (a no-op
+            # switch writes nothing)
+            return [{"sys_id": "PREF1", "value": "OLDSET"}]
         r = _pinned_routes()(table, params)
         if table == "sys_update_set" and not r:
             return [{"sys_id": "PREF1", "value": "SET1"}]
