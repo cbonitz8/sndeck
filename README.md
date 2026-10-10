@@ -1,7 +1,7 @@
 # sndeck
 
 A zero-LLM-token **ServiceNow workbench TUI** — a top/bottom-split file browser and
-update-set tracker. Reuses [happy-platform-mcp]'s cached keychain token, talks
+update-set tracker. Reuses [happy-platform-mcp]'s cached refresh token, talks
 to the Table API directly, and shows a scope → update set → table → file tree with an
 inline code viewer, live file-watching, tracked/pinned sets, deep-links, and two
 confirm-gated writes (switch current set, push local edits).
@@ -113,12 +113,13 @@ sndeck ships two Catppuccin themes — **Macchiato** (dark, default) and **Latte
 | `SNDECK_THEME` | `dark` | `"dark"` (Macchiato) or `"light"` (Latte) |
 | `SNDECK_STATE` | `~/.config/sndeck/state.json` | Tracked sets and split pane ratio |
 | `SNDECK_INSTANCES_CONFIG` | auto: `~/.config/happy-platform-mcp/instances.json` then `~/.config/sndeck/instances.json` | Explicit path to the instance-config JSON; overrides auto-detection. sndeck also honors the MCP's `HAPPY_CONFIG_PATH`. (`SNDECK_FORK_CONFIG` still works as a legacy alias.) |
-| `SNDECK_ACCOUNT` | the instance name (e.g. `dev`) | Keychain account key for the refresh token — happy-platform-mcp stores it under `currentInstanceName`, not `<user>@<instance>` (see Auth) |
+| `SNDECK_ACCOUNT` | the instance name (e.g. `dev`) | Account key for the refresh token file (`token-<account>`) — happy-platform-mcp stores it under `currentInstanceName`, not `<user>@<instance>` (see Auth) |
 
 ## Auth
 
-sndeck does **not** mint tokens. It reads the refresh token happy-platform-mcp cached in the
-macOS Keychain (service `happy-platform-mcp`) and replays the refresh grant. If no token
+sndeck does **not** mint tokens. It reads the refresh token happy-platform-mcp cached in
+`~/.config/happy-platform-mcp/token-<account>` (a 0600 file in a 0700 dir; `XDG_CONFIG_HOME`
+is honored) and replays the refresh grant. If no token
 is present, sndeck fails loud with a visible banner — **sign in via happy-platform-mcp first**.
 
 ## In a cockpit
