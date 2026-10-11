@@ -9,13 +9,13 @@ acts on the classes allowed for the call:
   C6 attic day folder old    delete                 gc --apply --attic-older-than N"""
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .refresh import plan_refresh
-from .snapshot import instance_fields, is_dirty, local_diff
+from .snapshot import field_changes, instance_fields, local_diff
 from .store import ATTIC_DIR, EDIT, REF, Store, count_legacy
 
 REF_TTL = timedelta(days=14)
@@ -35,6 +35,15 @@ class GcAction:
     diff: str = ""
 
 
+def _is_dirty(path: Path) -> bool:
+    """Like snapshot.is_dirty, but an unreadable snapshot counts as dirty: the edit
+    cannot be proven absent, so it must reach the live compare instead of C1."""
+    try:
+        return bool(field_changes(path))
+    except json.JSONDecodeError:
+        return True
+
+
 def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
     out: list[GcAction] = []
     for c in store.iter_copies(instance, EDIT):
@@ -49,7 +58,7 @@ def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
             continue
         if state not in SHIPPED:
             continue
-        if not is_dirty(c.path):
+        if not _is_dirty(c.path):
             out.append(GcAction("C1", c.path, label))
             continue
         live = fetch(c.table, c.sys_id)
@@ -58,9 +67,10 @@ def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
                                 c.table, c.name, c.sys_id, local_diff(c.path, {})))
             continue
         fields = instance_fields(live)
-        if plan_refresh(c.path, fields).local_diverged:
+        diff = local_diff(c.path, fields)
+        if diff:
             out.append(GcAction("C3", c.path, label, f"set {state}; local differs from instance",
-                                c.table, c.name, c.sys_id, local_diff(c.path, fields)))
+                                c.table, c.name, c.sys_id, diff))
         else:
             out.append(GcAction("C2", c.path, label))
     return out
@@ -70,6 +80,8 @@ def plan_gc(store: Store, instance: str, set_states: dict[str, str], fetch, now:
             *, attic_older_than_days: int | None = None) -> list[GcAction]:
     """Classify every copy for `instance`. An empty `set_states` means the state query
     told us nothing, so no set-based class is planned at all."""
+    if attic_older_than_days is not None and attic_older_than_days < 1:
+        raise ValueError("attic_older_than_days must be at least 1")
     actions: list[GcAction] = []
     if set_states:
         actions.extend(_edit_actions(store, instance, set_states, fetch))
@@ -80,7 +92,11 @@ def plan_gc(store: Store, instance: str, set_states: dict[str, str], fetch, now:
         attic = store.instance_dir(instance) / ATTIC_DIR
         if attic.is_dir():
             for d in sorted(p for p in attic.iterdir() if p.is_dir()):
-                if (now.date() - date.fromisoformat(d.name)).days > attic_older_than_days:
+                try:
+                    day = date.fromisoformat(d.name)
+                except ValueError:
+                    continue
+                if day < now.date() and (now.date() - day).days > attic_older_than_days:
                     actions.append(GcAction("C6", d, f"attic {d.name}"))
     return actions
 
@@ -94,6 +110,11 @@ def apply_gc(actions: list[GcAction], store: Store, instance: str, today: date, 
         if a.cls == "C3":
             dest = store.attic_path(instance, today, a.table, a.name, a.sys_id)
             dest.parent.mkdir(parents=True, exist_ok=True)
+            n = 2
+            base = dest
+            while dest.exists():
+                dest = base.with_name(f"{base.name}-{n}")
+                n += 1
             shutil.move(str(a.path), str(dest))
             (dest / "local.diff").write_text(a.diff, encoding="utf-8")
         else:

@@ -114,3 +114,44 @@ def test_reconcile_never_raises_and_reports_legacy(tmp_path, sn_client):
     lines = reconcile_and_report(sn_client(routes), Store(tmp_path))
     assert lines == ["1 legacy record folder under " + str(tmp_path)
                      + " — run `sndeck migrate`"]
+
+
+def test_corrupt_snapshot_is_not_c1(tmp_path):
+    c = make_copy(tmp_path, "dev", "sys_script", "B", "222", target_set=SET_B, dirty=True)
+    (c / ".snapshot.json").write_text('{"scr')
+    states = {SET_B["sys_id"]: "complete"}
+    differing = plan_gc(Store(tmp_path), "dev", states, _live("gs.info('x');"), NOW)
+    assert _classes(differing) == [("C3", "B__222")]
+    equal = plan_gc(Store(tmp_path), "dev", states, _live("gs.info('x'); // EDITED"), NOW)
+    assert _classes(equal) == [("C2", "B__222")]
+
+
+def test_attic_threshold_must_be_positive(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        plan_gc(Store(tmp_path), "dev", {}, _live(""), NOW, attic_older_than_days=0)
+
+
+def test_today_attic_folder_never_c6(tmp_path):
+    (tmp_path / "dev" / "_attic" / "2026-10-20").mkdir(parents=True)
+    assert plan_gc(Store(tmp_path), "dev", {}, _live(""), NOW, attic_older_than_days=1) == []
+
+
+def test_same_day_c3_twice_keeps_both(tmp_path):
+    s = Store(tmp_path)
+    states = {SET_B["sys_id"]: "complete"}
+    for script in ("one", "two"):
+        make_copy(tmp_path, "dev", "sys_script", "C", "333", target_set=SET_B, dirty=True)
+        acts = plan_gc(s, "dev", states, _live("gs.info('x');"), NOW)
+        apply_gc(acts, s, "dev", date(2026, 10, 20), auto=False)
+    day = tmp_path / "dev" / "_attic" / "2026-10-20" / "sys_script"
+    assert sorted(p.name for p in day.iterdir()) == ["C__333", "C__333-2"]
+    for p in day.iterdir():
+        assert (p / "local.diff").exists() and not (p / "C__333").exists()
+
+
+def test_non_date_attic_folder_skipped(tmp_path):
+    (tmp_path / "dev" / "_attic" / "notes").mkdir(parents=True)
+    (tmp_path / "dev" / "_attic" / "2026-09-01").mkdir()
+    acts = plan_gc(Store(tmp_path), "dev", {}, _live(""), NOW, attic_older_than_days=30)
+    assert _classes(acts) == [("C6", "2026-09-01")]
