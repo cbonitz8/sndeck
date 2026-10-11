@@ -1,8 +1,9 @@
-import json
+from types import SimpleNamespace
+
 import pytest
 from sndeck import tree
-from sndeck.registry import field_extension
-from sndeck.records import set_workspace
+from sndeck.store import Store
+from storekit import make_copy
 
 # Canonical fake sys_ids: 32 lowercase hex chars (required by scan_workspace regex)
 _SET1 = "1" * 32
@@ -14,6 +15,8 @@ _CHILD_ID = "c" * 32
 
 class FakeClient:
     """Minimal client implementing just what build_tree calls."""
+    instance = SimpleNamespace(name="dev")
+
     def __init__(self, *, user, cur_set_id, prefs, sets, entries):
         self._user = user; self._cur = cur_set_id
         self._prefs = prefs; self._sets = sets; self._entries = entries
@@ -64,38 +67,20 @@ def _setmeta(sid, name, scope="Global", *, base_update_set=None, parent=None):
             "parent": {"value": parent or ""}}
 
 
-def _pull(scratch, table, sid, name, fields, snapshot):
-    folder = scratch / table / f"{name}__{sid}"
-    folder.mkdir(parents=True)
-    (folder / "record.json").write_text(json.dumps(
-        {"_meta": {"table": table, "sys_id": sid, "name": name}, **snapshot}))
-    (folder / ".snapshot.json").write_text(json.dumps(snapshot))
-    for f, v in fields.items():
-        (folder / f"{f}{field_extension(f)}").write_text(v)
-
-
-def _pull_into_ws(ws_dir, table, sid, name, fields, snapshot):
-    """Like _pull but places the record inside a per-set workspace dir."""
-    folder = ws_dir / table / f"{name}__{sid}"
-    folder.mkdir(parents=True)
-    (folder / "record.json").write_text(json.dumps(
-        {"_meta": {"table": table, "sys_id": sid, "name": name}, **snapshot}))
-    (folder / ".snapshot.json").write_text(json.dumps(snapshot))
-    for f, v in fields.items():
-        (folder / f"{f}{field_extension(f)}").write_text(v)
+def _local(root, sid, name, set_id, *, dirty=False):
+    return make_copy(root, "dev", "sys_script", name, sid,
+                     target_set={"sys_id": set_id, "name": "s"}, dirty=dirty)
 
 
 def test_build_tree_groups_scope_set_table_and_flags(tmp_path):
     a, b = "a"*32, "f"*32
-    ws = set_workspace(tmp_path, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
     client = FakeClient(
         user={"sys_id": "U1", "user_name": "cbonitz"},
         cur_set_id=_SET1, prefs=_SET1,
         sets={_SET1: _setmeta(_SET1, "sn setup", "Global")},
         entries={_SET1: [_entry("sys_script", a, "MyBR"), _entry("sys_properties", b, "prop.x")]})
-    _pull_into_ws(ws, "sys_script", a, "MyBR", {"script": "orig"}, {"script": "orig"})  # local, clean
-    model = tree.build_tree(client, tmp_path, [])
+    _local(tmp_path, a, "MyBR", _SET1)
+    model = tree.build_tree(client, Store(tmp_path), [])
     assert model.error is None
     assert [s.name for s in model.scopes] == ["Global"]
     setnode = model.scopes[0].sets[0]
@@ -110,14 +95,12 @@ def test_build_tree_groups_scope_set_table_and_flags(tmp_path):
 
 def test_dirty_flag_set_when_local_edited(tmp_path):
     a = "a"*32
-    ws = set_workspace(tmp_path, _SET1, "s")
-    ws.mkdir(parents=True, exist_ok=True)
     client = FakeClient(user={"sys_id": "U1", "user_name": "cbonitz"},
                         cur_set_id=_SET1, prefs=_SET1,
                         sets={_SET1: _setmeta(_SET1, "s")},
                         entries={_SET1: [_entry("sys_script", a, "BR")]})
-    _pull_into_ws(ws, "sys_script", a, "BR", {"script": "EDITED"}, {"script": "orig"})
-    model = tree.build_tree(client, tmp_path, [])
+    _local(tmp_path, a, "BR", _SET1, dirty=True)
+    model = tree.build_tree(client, Store(tmp_path), [])
     assert model.scopes[0].sets[0].tables[0].files[0].dirty is True
 
 
@@ -127,7 +110,7 @@ def test_tracked_set_included_and_not_current(tmp_path):
                         cur_set_id=_SET1, prefs=_SET1,
                         sets={_SET1: _setmeta(_SET1, "cur"), _SET2: _setmeta(_SET2, "pinned")},
                         entries={_SET1: [], _SET2: [_entry("sys_script", a, "BR")]})
-    model = tree.build_tree(client, tmp_path, [_SET2])
+    model = tree.build_tree(client, Store(tmp_path), [_SET2])
     names = {s.name: s for scope in model.scopes for s in scope.sets}
     assert names["cur"].is_current and not names["pinned"].is_current
     assert names["pinned"].tables[0].files[0].in_current_set is False
@@ -137,7 +120,7 @@ def test_error_when_no_user(tmp_path):
     client = FakeClient(user=None, cur_set_id=None, prefs=None, sets={}, entries={})
     # FakeClient returns [self._user]; make it [] when user None:
     client._user = None
-    model = tree.build_tree(_NoUser(), tmp_path, [])
+    model = tree.build_tree(_NoUser(), Store(tmp_path), [])
     assert model.error and "user" in model.error.lower()
 
 
@@ -194,7 +177,7 @@ def test_dirty_files_empty_model():
 class _FakeClientWithSetAndLocal:
     """
     Set _SET_WS has record A in its manifest.
-    Its workspace dir additionally contains record B (local-only, not in manifest).
+    Record B has an edit copy targeting _SET_WS but is not in the manifest.
     """
     def __init__(self, tmp_path):
         self._tmp = tmp_path
@@ -202,11 +185,8 @@ class _FakeClientWithSetAndLocal:
         b_sid = "b" * 32
         self._set_id = _SET_WS
         self._set_name = "ws set"
-        # create the set workspace dir and write both records into it
-        ws = set_workspace(tmp_path, self._set_id, self._set_name)
-        ws.mkdir(parents=True, exist_ok=True)
-        _pull_into_ws(ws, "sys_script", a_sid, "RecordA", {"script": "a"}, {"script": "a"})
-        _pull_into_ws(ws, "sys_script", b_sid, "RecordB", {"script": "b"}, {"script": "b"})
+        _local(tmp_path, a_sid, "RecordA", self._set_id)
+        _local(tmp_path, b_sid, "RecordB", self._set_id)
         self._a_sid = a_sid
         self._b_sid = b_sid
         # manifest has only record A; record B is local-only
@@ -218,7 +198,7 @@ class _FakeClientWithSetAndLocal:
             user={"sys_id": "U1", "user_name": "cbonitz"},
             cur_set_id=self._set_id, prefs=self._set_id,
             sets=self._sets, entries=self._entries)
-        return tree.build_tree(client, self._tmp, [])
+        return tree.build_tree(client, Store(self._tmp), [])
 
 
 @pytest.fixture
@@ -254,7 +234,7 @@ class _FakeBatchClient:
             user={"sys_id": "U1", "user_name": "cbonitz"},
             cur_set_id=_BASE_ID, prefs=_BASE_ID,
             sets=self._sets, entries=self._entries)
-        return tree.build_tree(client, self._tmp, [])
+        return tree.build_tree(client, Store(self._tmp), [])
 
 
 @pytest.fixture
@@ -263,7 +243,7 @@ def fake_batch_client(tmp_path):
 
 
 def test_local_only_file_appears_untracked(fake_client_with_set_and_local):
-    # set manifest has record A; workspace dir for the set additionally has record B (local only)
+    # set manifest has record A; record B is an edit copy targeting the set (local only)
     model = fake_client_with_set_and_local.build()
     files = [f for sc in model.scopes for st in sc.sets for tb in st.tables for f in tb.files]
     by_id = {f.sys_id: f for f in files}
@@ -282,7 +262,7 @@ def test_batch_base_nests_members(fake_batch_client):
     )
 
 
-# ── model lookups (find_set / owner_of_record) ───────────────────────────────
+# ── model lookups (find_set / iter_sets) ─────────────────────────────────────
 
 def _model_with_batch():
     from sndeck.tree import SetNode, ScopeNode, TableNode, FileNode, TreeModel
@@ -306,15 +286,38 @@ def test_find_set_resolves_nested_member_to_its_scope():
     assert tree.find_set(None, "B" * 32) is None
 
 
-def test_owner_of_record_finds_staging_set_at_any_depth():
-    model, a = _model_with_batch()
-    assert tree.owner_of_record(model, "sys_script", a) == ("x_child", "C" * 32)
-    assert tree.owner_of_record(model, "sys_script", "z" * 32) is None
-    assert tree.owner_of_record(None, "sys_script", a) is None
-
-
 def test_iter_sets_yields_base_then_members():
     model, _a = _model_with_batch()
     ids = [s.sys_id for _scope, s in tree.iter_sets(model)]
     assert ids == ["B" * 32, "C" * 32]
     assert list(tree.iter_sets(None)) == []
+
+
+from sndeck.tree import build_tree
+from storekit import SET_A, sid
+
+
+def test_local_copy_shows_under_every_set_listing_it_and_local_only_under_target(tmp_path, sn_client):
+    shared, local_only, set_b = sid("1"), sid("2"), sid("b")
+    make_copy(tmp_path, "dev", "sys_script", "Shared", shared, target_set=SET_A)
+    make_copy(tmp_path, "dev", "sys_script", "LocalOnly", local_only, target_set=SET_A)
+
+    def routes(table, params):
+        q = params.get("sysparm_query", "")
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "u"}]
+        if table == "sys_user_preference":
+            return [{"value": SET_A["sys_id"]}]
+        if table == "sys_update_set":
+            hit = SET_A["sys_id"] if SET_A["sys_id"] in q else set_b
+            return [{"sys_id": hit, "name": hit[:1], "state": "in progress",
+                     "application": "global", "base_update_set": "", "parent": ""}]
+        if table == "sys_update_xml":
+            return [{"name": f"sys_script_{shared}", "target_name": "Shared",
+                     "type": "Business Rule"}]
+        return []
+    model = build_tree(sn_client(routes), Store(tmp_path), [set_b])
+    names = {(s.sys_id, f.name) for sc in model.scopes for s in sc.sets
+             for t in s.tables for f in t.files if f.local}
+    assert (SET_A["sys_id"], "Shared") in names and (set_b, "Shared") in names
+    assert (SET_A["sys_id"], "LocalOnly") in names and (set_b, "LocalOnly") not in names

@@ -1,5 +1,5 @@
 import os
-from sndeck.settings import load_sndeck_config, resolve_scratch, resolve_instance
+from sndeck.settings import load_sndeck_config, resolve_instance, resolve_store_root
 
 
 def test_load_config_missing_returns_empty(tmp_path):
@@ -13,17 +13,26 @@ def test_load_config_reads_toml(tmp_path):
     assert cfg["scratch_dir"] == "/x/y" and cfg["instance"] == "dev"
 
 
-def test_resolve_scratch_precedence():
+def test_resolve_store_root_sources(monkeypatch):
+    from sndeck.settings import resolve_store_root
+    assert resolve_store_root(["sndeck", "/x"], {}, {})[1] == "argument"
+    assert resolve_store_root(["sndeck"], {"SNDECK_SCRATCH": "/e"}, {}) == ("/e", "SNDECK_SCRATCH")
+    assert resolve_store_root(["sndeck"], {}, {"scratch_dir": "/c"}) == ("/c", "config scratch_dir")
+    path, src = resolve_store_root(["sndeck"], {}, {})
+    assert src == "default" and path.endswith("/.sn-scratch")
+
+
+def test_resolve_store_root_precedence():
     cfg = {"scratch_dir": "/from/config"}
-    assert resolve_scratch(["sndeck", "/from/arg"], {}, cfg, "/cwd") == "/from/arg"
-    assert resolve_scratch(["sndeck"], {"SNDECK_SCRATCH": "/from/env"}, cfg, "/cwd") == "/from/env"
-    assert resolve_scratch(["sndeck"], {}, cfg, "/cwd") == "/from/config"
-    assert resolve_scratch(["sndeck"], {}, {}, "/cwd") == "/cwd"
-    assert resolve_scratch(["sndeck", "--help"], {}, {}, "/cwd") == "/cwd"  # flags not treated as scratch
+    env = {"SNDECK_SCRATCH": "/from/env"}
+    assert resolve_store_root(["sndeck", "/from/arg"], env, cfg) == ("/from/arg", "argument")
+    assert resolve_store_root(["sndeck"], env, cfg) == ("/from/env", "SNDECK_SCRATCH")
+    assert resolve_store_root(["sndeck", "--help"], {}, {})[1] == "default"
 
 
-def test_resolve_scratch_expanduser():
-    assert resolve_scratch(["sndeck"], {}, {"scratch_dir": "~/x"}, "/cwd") == os.path.expanduser("~/x")
+def test_resolve_store_root_expanduser():
+    assert resolve_store_root(["sndeck"], {}, {"scratch_dir": "~/x"})[0] == os.path.expanduser("~/x")
+    assert resolve_store_root(["sndeck"], {}, {})[0] == os.path.expanduser("~/.sn-scratch")
 
 
 def test_resolve_instance_precedence():

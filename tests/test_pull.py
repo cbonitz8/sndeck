@@ -142,5 +142,23 @@ def test_pull_set_into_store_counts(tmp_path, sn_client):
         if table == "sys_script" and q == f"sys_id={r1}":
             return [{"sys_id": r1, "name": "A", "script": "a"}]
         return []
-    summary = pull_set_into_store(sn_client(routes), Store(tmp_path), SET_A["sys_id"], "Set A")
+    summary = pull_set_into_store(sn_client(routes), Store(tmp_path), SET_A["sys_id"], "Set A",
+                                  kind=EDIT)
     assert (summary.pulled, summary.refused, summary.skipped) == (1, 0, 1)
+
+
+def test_pull_set_into_store_ref_kind_writes_untargeted_ref_copies(tmp_path, sn_client):
+    r1 = sid("1")
+
+    def routes(table, params):
+        if table == "sys_update_xml":
+            return [{"name": f"sys_script_{r1}"}]
+        if table == "sys_script":
+            return [{"sys_id": r1, "name": "A", "script": "a"}]
+        return []
+    store = Store(tmp_path)
+    summary = pull_set_into_store(sn_client(routes), store, SET_A["sys_id"], "Set A", kind=REF)
+    assert (summary.pulled, summary.refused, summary.skipped) == (1, 0, 0)
+    assert store.iter_copies("dev", EDIT) == []
+    [c] = store.iter_copies("dev", REF)
+    assert c.target_set is None

@@ -148,20 +148,27 @@ def _legacy_line(store: Store) -> list[str]:
     return [f"{_plural(n, 'legacy record folder')} under {store.root} — run `sndeck migrate`"]
 
 
+def plan_for(client, store: Store, *,
+             attic_older_than_days: int | None = None) -> list[GcAction]:
+    """plan_gc for the client's instance, with set states and live records read from it."""
+    from .updatesets import update_set_states
+    instance = client.instance.name
+    ids = sorted({c.target_set["sys_id"] for c in store.iter_copies(instance, EDIT)
+                  if c.target_set is not None})
+    metas = update_set_states(client, ids) if ids else {}
+    states = {sid: m.state for sid, m in metas.items()}
+    return plan_gc(store, instance, states,
+                   lambda t, s: client.get_record(t, s, display_value="false"),
+                   datetime.now(timezone.utc), attic_older_than_days=attic_older_than_days)
+
+
 def reconcile_and_report(client, store: Store) -> list[str]:
     """Best-effort auto cleanup for the client's instance. Never raises; returns report
     lines. The legacy pointer is reported even when the network part fails."""
     lines: list[str] = []
     try:
-        from .updatesets import update_set_states
         instance = client.instance.name
-        ids = sorted({c.target_set["sys_id"] for c in store.iter_copies(instance, EDIT)
-                      if c.target_set is not None})
-        metas = update_set_states(client, ids) if ids else {}
-        states = {sid: m.state for sid, m in metas.items()}
-        actions = plan_gc(store, instance, states,
-                          lambda t, s: client.get_record(t, s, display_value="false"),
-                          datetime.now(timezone.utc))
+        actions = plan_for(client, store)
         applied = apply_gc(actions, store, instance, date.today(), auto=True)
         lines.extend(format_gc_report(actions, applied, instance))
     except Exception:

@@ -165,6 +165,40 @@ def update_set_meta(client, set_sys_id: str) -> UpdateSetMeta | None:
                          _dv(r, "state") or _raw(r, "state"), _dv(r, "application") or "Global")
 
 
+def set_routing_meta(client, set_sys_id: str) -> UpdateSetMeta | None:
+    """Raw state and raw scope sys_id of one set — what push routing compares and sets.
+    None if the set does not exist; ValueError if it has no application scope (SN
+    stores Global as the literal 'global', so empty is an anomaly, not Global)."""
+    rows = client.query("sys_update_set", query=f"sys_id={set_sys_id}",
+                        fields=["sys_id", "name", "state", "application"],
+                        display_value="all", limit=1)
+    if not rows:
+        return None
+    r = rows[0]
+    scope = _raw(r, "application")
+    if not scope:
+        raise ValueError(f"update set {set_sys_id} has no application scope")
+    return UpdateSetMeta(_raw(r, "sys_id"), _dv(r, "name") or _raw(r, "name"),
+                         _raw(r, "state"), scope)
+
+
+def sets_holding(client, keys: list[tuple[str, str]]) -> dict[tuple[str, str], list[str]]:
+    """For each (table, sys_id), the update sets holding a capture of it — one query."""
+    names = {f"{t}_{s}": (t, s) for t, s in keys}
+    out: dict[tuple[str, str], list[str]] = {k: [] for k in keys}
+    if not names:
+        return out
+    rows = client.query("sys_update_xml", query="nameIN" + ",".join(names),
+                        fields=["name", "update_set"], display_value="false",
+                        limit=len(names) * 20)
+    for r in rows:
+        key = names.get(r["name"])
+        sid = r["update_set"]["value"] if isinstance(r["update_set"], dict) else r["update_set"]
+        if key is not None and sid not in out[key]:
+            out[key].append(sid)
+    return out
+
+
 def update_set_states(client, sys_ids: list[str]) -> dict[str, UpdateSetMeta]:
     """Resolve name/state/scope for many update sets in ONE query.
 

@@ -5,24 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .auth import AuthExpiredError
-from .records import pull_record
+from .refresh import apply_refresh
+from .snapshot import read_meta_extra
+from .store import EDIT, REF
 from .sync import build_push_plan, apply_push
-from .tree import owner_of_record
-from .updatesets import (capture_for_record, current_user, read_pref, set_scope_pointer,
-                         set_current_application, update_set_meta)
-
-
-def set_for_record(model, table: str, sys_id: str) -> tuple[str, str] | None:
-    """(raw scope sys_id, owning set sys_id) for the set that stages (table, sys_id) —
-    the record-owner lookup push routing needs. The model traversal itself lives in
-    tree.owner_of_record; this is the push-side name for it."""
-    return owner_of_record(model, table, sys_id)
-
-
-def scope_for_record(model, table: str, sys_id: str) -> str | None:
-    """Raw scope sys_id of the set that stages (table, sys_id); None if unstaged."""
-    found = set_for_record(model, table, sys_id)
-    return found[0] if found is not None else None
+from .updatesets import (capture_for_record, current_user, read_pref, set_routing_meta,
+                         set_scope_pointer, set_current_application, update_set_meta)
 
 
 @dataclass(frozen=True)
@@ -56,14 +44,17 @@ def verify_capture(client, table: str, sys_id: str, intended: str | None) -> str
     return None
 
 
-def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
-    """Push every staged record path. Per-record: build plan, route the record's scope
-    pointer to its owning batch member, align the active scope only when it changes,
+def push_all(client, record_paths: list) -> list["PushOutcome"]:
+    """Push every staged record path. Per-record: build plan, route to the copy's
+    `_meta.target_set` (refusing ref copies and targets that are not in progress), aim
+    that scope's pointer at the target, align the active scope only when it changes,
     start a fresh server session if either pref moved (an open session keeps the prefs
     it read at open, so its PUT would capture by the old ones), apply, verify the capture
-    landed in the intended set, then re-pull to refresh the snapshot. A failed record
-    becomes a not-pushed outcome and the rest still push; a miscapture is a pushed
-    outcome carrying capture_error. AuthExpiredError propagates (never swallowed)."""
+    landed in the target set, then re-baseline the copy from the live record (every
+    local change was just PUT, so the live record replaces snapshot and files alike). A
+    failed record becomes a not-pushed outcome and the rest still push; a miscapture is
+    a pushed outcome carrying capture_error. AuthExpiredError propagates (never
+    swallowed)."""
     user = current_user(client)
     aligned = read_pref(client, user.sys_id, "apps.current_app") if user else None
     outcomes: list[PushOutcome] = []
@@ -74,20 +65,39 @@ def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
         try:
             plan = build_push_plan(client, path)
             table, sys_id, name = plan.table, plan.sys_id, plan.name
+            extra = read_meta_extra(path)
+            if "kind" not in extra:
+                raise RuntimeError("legacy copy without store metadata; run `sndeck migrate`")
+            copy_instance = extra.get("instance")
+            if copy_instance != client.instance.name:
+                raise RuntimeError(f"copy belongs to instance '{copy_instance}', "
+                                   f"not '{client.instance.name}'")
+            if extra["kind"] == REF:
+                raise RuntimeError("reference copies are never pushed; pull --edit first")
+            if extra["kind"] != EDIT:
+                raise RuntimeError(f"unknown copy kind {extra['kind']!r} in record.json")
+            target = extra.get("target_set")
+            if target is None:
+                raise RuntimeError("no target update set; run `sndeck retarget`")
+            if not (isinstance(target, dict) and "sys_id" in target and "name" in target):
+                raise RuntimeError("malformed target_set in record.json; run `sndeck retarget`")
+            meta = set_routing_meta(client, target["sys_id"])
+            if meta is None:
+                raise RuntimeError(f"target set '{target['name']}' not found on "
+                                   f"{client.instance.name}; run `sndeck retarget`")
+            if meta.state != "in progress":
+                raise RuntimeError(f"target set '{meta.name}' is {meta.state}; "
+                                   f"run `sndeck retarget`")
+            intended = meta.sys_id
             if user:
                 try:
-                    owner = set_for_record(model, plan.table, plan.sys_id)
-                    if owner is not None:
-                        rec_scope, intended = owner
-                        moved = set_scope_pointer(client, user.sys_id, rec_scope, intended)
-                        if rec_scope != aligned:
-                            set_current_application(client, user.sys_id, rec_scope)
-                            routed = rec_scope
-                            aligned = rec_scope
-                        if moved or routed:
-                            client.reset_session()
-                    else:
-                        intended = read_pref(client, user.sys_id, "sys_update_set")
+                    moved = set_scope_pointer(client, user.sys_id, meta.scope, intended)
+                    if meta.scope != aligned:
+                        set_current_application(client, user.sys_id, meta.scope)
+                        routed = meta.scope
+                        aligned = meta.scope
+                    if moved or routed:
+                        client.reset_session()
                 except AuthExpiredError:
                     raise
                 except Exception:
@@ -99,11 +109,16 @@ def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
                 raise
             except Exception as e:
                 capture_error = f"could not verify capture: {e}"
-            try:
-                pull_record(client, plan.table, plan.sys_id, Path(path).parents[1])
-            except LookupError:
-                pass
             pushed = True
+            try:
+                live = client.get_record(plan.table, plan.sys_id, display_value="false")
+                if live is not None:
+                    apply_refresh(path, live, overwrite_local=True)
+            except AuthExpiredError:
+                raise
+            except Exception as e:
+                rebase = f"pushed, but could not re-baseline the local copy: {e}"
+                warning = rebase if warning is None else f"{warning}; {rebase}"
         except AuthExpiredError:
             raise
         except Exception as e:
@@ -115,5 +130,5 @@ def push_all(client, model, record_paths: list) -> list["PushOutcome"]:
     return outcomes
 
 
-def push_one(client, model, record_path) -> "PushOutcome":
-    return push_all(client, model, [record_path])[0]
+def push_one(client, record_path) -> "PushOutcome":
+    return push_all(client, [record_path])[0]

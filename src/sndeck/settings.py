@@ -5,6 +5,7 @@ import os
 import tomllib
 
 DEFAULT_CONFIG_PATH = "~/.config/sndeck/config.toml"
+DEFAULT_STORE_ROOT = "~/.sn-scratch"
 
 
 def load_sndeck_config(path: str | None = None) -> dict:
@@ -17,13 +18,16 @@ def load_sndeck_config(path: str | None = None) -> dict:
         return {}
 
 
-def resolve_scratch(argv: list[str], environ, cfg: dict, cwd: str) -> str:
-    """Precedence: CLI positional arg > SNDECK_SCRATCH env > config scratch_dir > cwd."""
+def resolve_store_root(argv: list[str], environ, cfg: dict) -> tuple[str, str]:
+    """(store root, where it came from). Precedence: CLI positional arg > SNDECK_SCRATCH
+    env > config scratch_dir > ~/.sn-scratch."""
     if len(argv) > 1 and not argv[1].startswith("-"):
-        val = argv[1]
-    else:
-        val = environ.get("SNDECK_SCRATCH") or cfg.get("scratch_dir") or cwd
-    return os.path.expanduser(val)
+        return os.path.expanduser(argv[1]), "argument"
+    if environ.get("SNDECK_SCRATCH"):
+        return os.path.expanduser(environ["SNDECK_SCRATCH"]), "SNDECK_SCRATCH"
+    if cfg.get("scratch_dir"):
+        return os.path.expanduser(cfg["scratch_dir"]), "config scratch_dir"
+    return os.path.expanduser(DEFAULT_STORE_ROOT), "default"
 
 
 def resolve_instance(environ, cfg: dict) -> str:

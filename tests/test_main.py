@@ -72,3 +72,31 @@ def test_subcommand_routes_to_cli(monkeypatch, no_tui):
     rc = m.main()
     assert rc == 0
     assert called["argv"] == ["us", "get"]
+
+
+def test_terminal_launch_refuses_legacy_root(tmp_path, monkeypatch, capsys, no_tui):
+    root = tmp_path / "vendor-hotfix"
+    (root / ("rel__" + "b" * 32)).mkdir(parents=True)
+    monkeypatch.setattr(sys, "argv", ["sndeck", str(root)])
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    rc = m.main()
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "legacy per-task root" in err and "(store root from argument)" in err
+
+
+def test_terminal_launch_passes_store_root_to_tui(tmp_path, monkeypatch):
+    seen = {}
+
+    class _FakeApp:
+        def __init__(self, client, root, theme): seen["root"] = root
+        def run(self): pass
+
+    monkeypatch.setattr(sys, "argv", ["sndeck", str(tmp_path)])
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(m, "load_instance", lambda name: object())
+    monkeypatch.setattr(m, "TokenProvider", lambda inst: object())
+    monkeypatch.setattr(m, "TableClient", lambda inst, tok: object())
+    monkeypatch.setattr(m, "SndeckApp", _FakeApp)
+    assert m.main() == 0
+    assert seen["root"] == str(tmp_path)

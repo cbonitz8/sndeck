@@ -5,11 +5,11 @@ import shutil
 import pytest
 
 from conftest import _REAL_HOME
-from sndeck.settings import load_sndeck_config, resolve_scratch
+from sndeck.settings import load_sndeck_config, resolve_store_root
 
 
 def test_scratch_resolves_outside_real_home():
-    scratch = resolve_scratch([], os.environ, load_sndeck_config(), os.getcwd())
+    scratch = resolve_store_root([], os.environ, load_sndeck_config())[0]
     assert not os.path.realpath(scratch).startswith(str(_REAL_HOME) + os.sep)
 
 

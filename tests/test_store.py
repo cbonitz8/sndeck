@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 from datetime import date
 
@@ -100,3 +101,20 @@ def test_count_legacy_raises_on_record_without_meta(tmp_path):
     (bad / "record.json").write_text("{}")
     with pytest.raises(KeyError):
         count_legacy(tmp_path)
+
+
+def test_check_store_root_on_default_root_names_manual_remedy(tmp_path):
+    import os
+    from sndeck.migrate import find_legacy
+    root = Path(os.path.expanduser("~/.sn-scratch"))
+    make_legacy(root / f"rel__{sid('b')}", "sys_script", "A", "111")
+    make_legacy(root / f"two__{sid('c')}", "sys_script", "B", "222")
+    msg = check_store_root(root, ["dev"])
+    assert "move them into a subfolder" in msg and "sndeck migrate" in msg
+    assert f"rel__{sid('b')}" in msg and f"two__{sid('c')}" in msg
+    assert "point sndeck at" not in msg
+    (root / "legacy").mkdir()
+    for d in (f"rel__{sid('b')}", f"two__{sid('c')}"):
+        (root / d).rename(root / "legacy" / d)
+    assert check_store_root(root, ["dev"]) is None
+    assert len(find_legacy(root, ["dev"])) == 2

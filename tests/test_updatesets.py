@@ -531,3 +531,41 @@ def test_read_pref_returns_value_or_none():
     c = _RecordingClient({"name=apps.current_app^user=u1": [{"value": "x_scope"}]})
     assert read_pref(c, "u1", "apps.current_app") == "x_scope"
     assert read_pref(c, "u1", "missing") is None
+
+
+def test_set_routing_meta_returns_raw_state_and_scope():
+    from sndeck.updatesets import set_routing_meta
+    def routes(table, params):
+        return [{"sys_id": {"value": "S1"}, "name": {"value": "s", "display_value": "My Set"},
+                 "state": {"value": "in progress", "display_value": "In progress"},
+                 "application": {"value": "x_scope_sid", "display_value": "My App"}}]
+    meta = set_routing_meta(_client(routes), "S1")
+    assert meta == UpdateSetMeta("S1", "My Set", "in progress", "x_scope_sid")
+    assert set_routing_meta(_client(lambda t, p: []), "S1") is None
+
+
+def test_set_routing_meta_raises_on_empty_application():
+    import pytest
+    from sndeck.updatesets import set_routing_meta
+    def routes(table, params):
+        return [{"sys_id": "S1", "name": "s", "state": "in progress", "application": ""}]
+    with pytest.raises(ValueError, match="S1 has no application scope"):
+        set_routing_meta(_client(routes), "S1")
+
+
+def test_sets_holding_maps_each_record_to_its_sets_in_one_query():
+    from sndeck.updatesets import sets_holding
+    a, b, c = "a" * 32, "b" * 32, "c" * 32
+    calls = []
+    def routes(table, params):
+        calls.append(params["sysparm_query"])
+        return [{"name": f"sys_script_{a}", "update_set": "S1"},
+                {"name": f"sys_script_{a}", "update_set": {"value": "S2"}},
+                {"name": f"sys_script_{a}", "update_set": "S1"},
+                {"name": f"sys_script_include_{b}", "update_set": "S3"}]
+    out = sets_holding(_client(routes), [("sys_script", a), ("sys_script_include", b),
+                                         ("sys_script", c)])
+    assert out == {("sys_script", a): ["S1", "S2"], ("sys_script_include", b): ["S3"],
+                   ("sys_script", c): []}
+    assert len(calls) == 1 and calls[0].startswith("nameIN")
+    assert sets_holding(_client(routes), []) == {} and len(calls) == 1

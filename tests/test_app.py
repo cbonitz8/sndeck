@@ -5,14 +5,33 @@ from pathlib import Path
 from rich.text import Text as RichText
 from textual.widgets import Tree, Static, TextArea
 from sndeck.app import SndeckApp, LegendScreen
-from sndeck.records import pull_record, set_workspace
 from sndeck.rest import TableClient
 from sndeck.config import Instance
 from sndeck.theme import MACCHIATO, LATTE
 from sndeck.watcher import ScratchChanged
+from storekit import make_copy, sid
 
-# Canonical 32-hex set sys_id used by route factories that need a workspace dir.
+# Canonical 32-hex set sys_id used as the current set and the copies' target set.
 _SET1 = "1" * 32
+
+
+def _target(name):
+    return {"sys_id": _SET1, "name": name}
+
+
+def _store_copy(root, table, name, sys_id, fields, files, set_name="sn setup"):
+    """A clean dev edit copy targeting _SET1 with arbitrary fields and field files —
+    for tables make_copy (script.js only) does not cover."""
+    folder = Path(root) / "dev" / table / f"{name}__{sys_id}"
+    folder.mkdir(parents=True)
+    meta = {"table": table, "sys_id": sys_id, "name": name, "instance": "dev",
+            "kind": "edit", "target_set": _target(set_name),
+            "pulled_at": "2026-10-01T00:00:00+00:00"}
+    folder.joinpath("record.json").write_text(json.dumps({"_meta": meta, **fields}))
+    folder.joinpath(".snapshot.json").write_text(json.dumps(fields))
+    for fname, content in files.items():
+        folder.joinpath(fname).write_text(content)
+    return folder
 
 INST = Instance("dev", "https://x.service-now.com", "cid",
                 "https://x.service-now.com/oauth_token.do", "cbonitz@x")
@@ -47,15 +66,8 @@ def _make_client_for_app(routes=None):
 
 def _routes_factory(scratch):
     a = "a" * 32
-    # pull one BR locally inside the set's workspace dir so scan_workspace finds it
-    ws = set_workspace(scratch, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "x"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("x")
+    make_copy(scratch, "dev", "sys_script", "MyBR", a, target_set=_target("sn setup"),
+              script="x")
 
     def routes(table, params):
         if table == "sys_user":
@@ -393,14 +405,8 @@ async def test_show_preview_double_call_same_record_no_blank(tmp_path, sn_client
 @pytest.mark.asyncio
 async def test_push_writes_only_on_confirm(tmp_path, sn_client):
     a = "a"*32
-    ws = set_workspace(tmp_path, _SET1, "cur")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"BR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "BR"}, "script": "orig"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "orig"}))
-    folder.joinpath("script.js").write_text("EDITED")   # dirty
+    make_copy(tmp_path, "dev", "sys_script", "BR", a, target_set=_target("cur"),
+              script="orig", dirty=True)
     writes = []
     def routes(table, params):
         if table == "sys_user": return [{"sys_id": "U1", "user_name": "cbonitz"}]
@@ -408,7 +414,7 @@ async def test_push_writes_only_on_confirm(tmp_path, sn_client):
         if table == "sys_update_set":
             return [{"sys_id": {"value": _SET1}, "name": {"value": "cur"},
                      "state": {"value": "in progress", "display_value": "In progress"},
-                     "application": {"display_value": "Global"}}]
+                     "application": {"value": "global", "display_value": "Global"}}]
         if table == "sys_update_xml":
             return [{"name": {"value": f"sys_script_{a}"},
                      "target_name": {"display_value": "BR"}, "type": {"display_value": "Update"}}]
@@ -428,9 +434,10 @@ async def test_push_writes_only_on_confirm(tmp_path, sn_client):
         await pilot.pause()
         assert writes == []
         await pilot.press("y")
+        await app.workers.wait_for_complete()
         await pilot.pause()
-        await pilot.pause()
-        assert writes and writes[0][0] == "PUT" and writes[0][3] == {"script": "EDITED"}
+        puts = [w for w in writes if w[0] == "PUT"]
+        assert puts and puts[0][3] == {"script": "orig // EDITED"}
 
 
 # ── Finding I1: local-only refresh on ScratchChanged — no network ────────────
@@ -461,7 +468,7 @@ async def test_scratch_changed_no_network(tmp_path, sn_client):
         app._client = BombClient()
 
         # Fire ScratchChanged; must not raise and tree must still show records.
-        event = ScratchChanged({str(tmp_path / "sys_script" / "x" / "script.js")})
+        event = ScratchChanged({str(tmp_path / "dev" / "sys_script" / "x" / "script.js")})
         await app.on_scratch_changed(event)
         await pilot.pause()
 
@@ -487,8 +494,7 @@ async def test_scratch_changed_dirty_badge_appears(tmp_path, sn_client):
 
         # Edit the local script file (in the workspace dir) to make it dirty.
         a = "a" * 32
-        ws = set_workspace(tmp_path, _SET1, "sn setup")
-        script_path = ws / "sys_script" / f"MyBR__{a}" / "script.js"
+        script_path = tmp_path / "dev" / "sys_script" / f"MyBR__{a}" / "script.js"
         script_path.write_text("EDITED")
 
         # Swap client, trigger local refresh.
@@ -509,17 +515,9 @@ async def test_show_preview_preserves_selected_field(tmp_path, sn_client):
     selected field, not snap back to the default."""
     # Build a widget with multiple fields so default != client_script.
     a = "a" * 32
-    ws = set_workspace(tmp_path, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sp_widget" / f"MyWidget__{a}"
-    folder.mkdir(parents=True)
-    meta = {"_meta": {"table": "sp_widget", "sys_id": a, "name": "MyWidget"},
-            "script": "server", "client_script": "client"}
-    folder.joinpath("record.json").write_text(json.dumps(meta))
-    folder.joinpath(".snapshot.json").write_text(json.dumps(
-        {"script": "server", "client_script": "client"}))
-    folder.joinpath("script.js").write_text("server")
-    folder.joinpath("client_script.js").write_text("client")
+    _store_copy(tmp_path, "sp_widget", "MyWidget", a,
+                {"script": "server", "client_script": "client"},
+                {"script.js": "server", "client_script.js": "client"})
 
     def routes(table, params):
         if table == "sys_user": return [{"sys_id": "U1", "user_name": "cbonitz"}]
@@ -573,15 +571,8 @@ async def test_show_preview_different_records_same_tab_key_no_duplicate_ids(tmp_
     a = "a" * 32
     b = "b" * 32
 
-    ws = set_workspace(tmp_path, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
     for sys_id, name in [(a, "PropA"), (b, "PropB")]:
-        folder = ws / "sys_properties" / f"{name}__{sys_id}"
-        folder.mkdir(parents=True)
-        meta = {"_meta": {"table": "sys_properties", "sys_id": sys_id, "name": name},
-                "value": f"val_{name}"}
-        folder.joinpath("record.json").write_text(json.dumps(meta))
-        folder.joinpath(".snapshot.json").write_text(json.dumps({"value": f"val_{name}"}))
+        _store_copy(tmp_path, "sys_properties", name, sys_id, {"value": f"val_{name}"}, {})
 
     def routes(table, params):
         if table == "sys_user": return [{"sys_id": "U1", "user_name": "cbonitz"}]
@@ -657,14 +648,7 @@ async def test_lang_for_js_returns_javascript(tmp_path, sn_client):
 async def test_lang_for_record_json_returns_json(tmp_path, sn_client):
     """Loading a record.json non-code record must set body.language to 'json'."""
     a = "a" * 32
-    ws = set_workspace(tmp_path, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_properties" / f"MyProp__{a}"
-    folder.mkdir(parents=True)
-    meta = {"_meta": {"table": "sys_properties", "sys_id": a, "name": "MyProp"},
-            "value": "somevalue"}
-    folder.joinpath("record.json").write_text(json.dumps(meta))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"value": "somevalue"}))
+    _store_copy(tmp_path, "sys_properties", "MyProp", a, {"value": "somevalue"}, {})
 
     def routes(table, params):
         if table == "sys_user": return [{"sys_id": "U1", "user_name": "cbonitz"}]
@@ -699,17 +683,9 @@ async def test_lang_for_record_json_returns_json(tmp_path, sn_client):
 def _widget_routes(scratch):
     """Set up a sp_widget with script + client_script on disk. Returns the routes fn."""
     a = "a" * 32
-    ws = set_workspace(scratch, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sp_widget" / f"MyWidget__{a}"
-    folder.mkdir(parents=True)
-    meta = {"_meta": {"table": "sp_widget", "sys_id": a, "name": "MyWidget"},
-            "script": "server", "client_script": "client"}
-    folder.joinpath("record.json").write_text(json.dumps(meta))
-    folder.joinpath(".snapshot.json").write_text(json.dumps(
-        {"script": "server", "client_script": "client"}))
-    folder.joinpath("script.js").write_text("server")
-    folder.joinpath("client_script.js").write_text("client")
+    _store_copy(scratch, "sp_widget", "MyWidget", a,
+                {"script": "server", "client_script": "client"},
+                {"script.js": "server", "client_script.js": "client"})
 
     def routes(table, params):
         if table == "sys_user": return [{"sys_id": "U1", "user_name": "cbonitz"}]
@@ -832,22 +808,10 @@ async def test_render_tree_scope_and_table_labels_are_rich_text(tmp_path, sn_cli
 def _widget_with_3_fields(scratch):
     """sp_widget with script + client_script + template — guarantees >=3 tabs."""
     a = "a" * 32
-    ws = set_workspace(scratch, _SET1, "sn setup")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sp_widget" / f"MyWidget__{a}"
-    folder.mkdir(parents=True)
-    meta = {
-        "_meta": {"table": "sp_widget", "sys_id": a, "name": "MyWidget"},
-        "script": "server",
-        "client_script": "client",
-        "template": "<div></div>",
-    }
-    folder.joinpath("record.json").write_text(json.dumps(meta))
-    folder.joinpath(".snapshot.json").write_text(json.dumps(
-        {"script": "server", "client_script": "client", "template": "<div></div>"}))
-    folder.joinpath("script.js").write_text("server")
-    folder.joinpath("client_script.js").write_text("client")
-    folder.joinpath("template.html").write_text("<div></div>")
+    _store_copy(scratch, "sp_widget", "MyWidget", a,
+                {"script": "server", "client_script": "client", "template": "<div></div>"},
+                {"script.js": "server", "client_script.js": "client",
+                 "template.html": "<div></div>"})
 
     def routes(table, params):
         if table == "sys_user":
@@ -898,7 +862,7 @@ async def test_scratch_changed_does_not_wipe_preview(tmp_path, sn_client):
 
         # Fire ScratchChanged — must NOT wipe tabs or move cursor.
         widget_folder = "MyWidget__" + "a" * 32
-        event = ScratchChanged({str(tmp_path / "sp_widget" / widget_folder / "script.js")})
+        event = ScratchChanged({str(tmp_path / "dev" / "sp_widget" / widget_folder / "script.js")})
         await app.on_scratch_changed(event)
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -1001,14 +965,8 @@ from textual.widgets import DataTable
 def _dirty_br_routes(scratch, *, sys_id, name, instance_script):
     """One business rule pulled locally with an EDITED script (dirty). The instance
     returns instance_script for the drift check."""
-    ws = set_workspace(scratch, _SET1, "cur")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"{name}__{sys_id}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": sys_id, "name": name}, "script": "orig"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "orig"}))
-    folder.joinpath("script.js").write_text("EDITED")  # dirty vs snapshot
+    make_copy(scratch, "dev", "sys_script", name, sys_id, target_set=_target("cur"),
+              script="orig", dirty=True)
 
     def routes(table, params):
         if table == "sys_user":
@@ -1060,21 +1018,15 @@ async def test_staging_row_highlight_loads_preview(tmp_path, sn_client):
         await pilot.pause()
         assert app._preview_key == ("sys_script", a)
         body = app.query_one("#preview-body", TextArea)
-        assert body.text == "EDITED"
+        assert body.text == "orig // EDITED"
 
 
 @pytest.mark.asyncio
 async def test_push_all_pushes_every_staged_record(tmp_path, sn_client):
     a, b = "a" * 32, "b" * 32
-    ws = set_workspace(tmp_path, _SET1, "cur")
-    ws.mkdir(parents=True, exist_ok=True)
-    for sid, nm in ((a, "BR_A"), (b, "BR_B")):
-        folder = ws / "sys_script" / f"{nm}__{sid}"
-        folder.mkdir(parents=True)
-        folder.joinpath("record.json").write_text(json.dumps(
-            {"_meta": {"table": "sys_script", "sys_id": sid, "name": nm}, "script": "orig"}))
-        folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "orig"}))
-        folder.joinpath("script.js").write_text("EDITED")
+    for sys_id, nm in ((a, "BR_A"), (b, "BR_B")):
+        make_copy(tmp_path, "dev", "sys_script", nm, sys_id, target_set=_target("cur"),
+                  script="orig", dirty=True)
     writes = []
 
     def routes(table, params):
@@ -1085,7 +1037,7 @@ async def test_push_all_pushes_every_staged_record(tmp_path, sn_client):
         if table == "sys_update_set":
             return [{"sys_id": {"value": _SET1}, "name": {"value": "cur"},
                      "state": {"value": "in progress", "display_value": "In progress"},
-                     "application": {"display_value": "Global"}}]
+                     "application": {"value": "global", "display_value": "Global"}}]
         if table == "sys_update_xml":
             return [{"name": {"value": f"sys_script_{a}"},
                      "target_name": {"display_value": "BR_A"}, "type": {"display_value": "Update"}},
@@ -1116,150 +1068,30 @@ async def test_push_all_pushes_every_staged_record(tmp_path, sn_client):
 
 
 @pytest.mark.asyncio
-async def test_pinned_modal_unpin_removes_tracking_and_clean_files(tmp_path, monkeypatch):
+async def test_pinned_modal_unpin_removes_tracking_and_keeps_files(tmp_path, monkeypatch):
+    """Unpin only drops tracking: clean and dirty copies targeting the set stay on disk
+    and no delete-confirm screen appears."""
     monkeypatch.setenv("SNDECK_STATE", str(tmp_path / "state.json"))
     from sndeck import state as st
-    st.pin("SET2", name="Done Set")     # completed set -> unpin-only
-    a = "a" * 32
-    # a clean local record that belongs to SET2, in the per-set workspace dir
-    ws = set_workspace(tmp_path, "SET2", "Done Set")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "x"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("x")
+    from sndeck.app import PinnedSetsScreen
+    st.pin("SET1", name="In-Prog Set")
+    target = {"sys_id": "SET1", "name": "In-Prog Set"}
+    clean = make_copy(tmp_path, "dev", "sys_script", "Clean", sid("a"), target_set=target)
+    dirty = make_copy(tmp_path, "dev", "sys_script", "Dirty", sid("b"), target_set=target,
+                      dirty=True)
 
     app = SndeckApp(_client(_pinned_routes()), tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("s")
         await pilot.pause()
-        await pilot.press("x")            # unpin the clean completed set
+        await pilot.press("x")
         await pilot.pause()
-    assert st.load_state().tracked_sets == []     # untracked
-    assert not ws.exists()                        # whole workspace dir deleted
-
-
-@pytest.mark.asyncio
-async def test_pinned_modal_unpin_dirty_prompts_and_keeps_on_cancel(tmp_path, monkeypatch):
-    monkeypatch.setenv("SNDECK_STATE", str(tmp_path / "state.json"))
-    from sndeck import state as st
-    st.pin("SET2", name="Done Set")
-    a = "a" * 32
-    ws = set_workspace(tmp_path, "SET2", "Done Set")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "EDITED"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("EDITED")   # dirty vs snapshot
-
-    app = SndeckApp(_client(_pinned_routes()), tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("s")
-        await pilot.pause()
-        await pilot.press("x")            # unpin dirty set -> confirm appears
-        await pilot.pause()
-        from sndeck.app import DeleteFilesConfirmScreen
-        assert isinstance(app.screen, DeleteFilesConfirmScreen)
-        await pilot.press("escape")       # cancel deletion
-        await pilot.pause()
-    assert st.load_state().tracked_sets == []     # tracking still removed
-    assert ws.exists()                            # dirty workspace preserved on cancel
-
-
-@pytest.mark.asyncio
-async def test_pinned_modal_unpin_dirty_prompts_and_deletes_on_confirm(tmp_path, monkeypatch):
-    monkeypatch.setenv("SNDECK_STATE", str(tmp_path / "state.json"))
-    from sndeck import state as st
-    st.pin("SET2", name="Done Set")
-    a = "a" * 32
-    ws = set_workspace(tmp_path, "SET2", "Done Set")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "EDITED"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("EDITED")   # dirty vs snapshot
-
-    app = SndeckApp(_client(_pinned_routes()), tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("s")
-        await pilot.pause()
-        await pilot.press("x")            # unpin dirty set -> confirm appears
-        await pilot.pause()
-        from sndeck.app import DeleteFilesConfirmScreen
-        assert isinstance(app.screen, DeleteFilesConfirmScreen)
-        await pilot.press("y")            # confirm deletion
-        await pilot.pause()
-    assert st.load_state().tracked_sets == []     # tracking removed
-    assert not ws.exists()                        # whole workspace dir deleted on confirm
-
-
-@pytest.mark.asyncio
-async def test_pinned_modal_unpin_per_set_workspace_dir_deleted_on_clean(tmp_path, monkeypatch):
-    """Unpin with a per-set workspace dir (3-level layout) removes the whole workspace dir."""
-    monkeypatch.setenv("SNDECK_STATE", str(tmp_path / "state.json"))
-    from sndeck import state as st
-    a = "a" * 32
-    st.pin("SET2", name="Done Set")
-    # Create a per-set workspace dir with a clean record inside
-    ws = set_workspace(tmp_path, "SET2", "Done Set")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "x"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("x")
-
-    app = SndeckApp(_client(_pinned_routes()), tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("s")
-        await pilot.pause()
-        await pilot.press("x")            # unpin the clean set
-        await pilot.pause()
-    assert st.load_state().tracked_sets == []     # untracked
-    assert not ws.exists()                        # whole workspace dir removed
-
-
-@pytest.mark.asyncio
-async def test_pinned_modal_unpin_per_set_workspace_dir_dirty_warns_cancel_keeps(tmp_path, monkeypatch):
-    """Unpin with a dirty per-set workspace dir shows confirm screen; cancel preserves workspace."""
-    monkeypatch.setenv("SNDECK_STATE", str(tmp_path / "state.json"))
-    from sndeck import state as st
-    a = "a" * 32
-    st.pin("SET2", name="Done Set")
-    # Create a per-set workspace dir with a dirty record inside
-    ws = set_workspace(tmp_path, "SET2", "Done Set")
-    ws.mkdir(parents=True, exist_ok=True)
-    folder = ws / "sys_script" / f"MyBR__{a}"
-    folder.mkdir(parents=True)
-    folder.joinpath("record.json").write_text(json.dumps(
-        {"_meta": {"table": "sys_script", "sys_id": a, "name": "MyBR"}, "script": "EDITED"}))
-    folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "x"}))
-    folder.joinpath("script.js").write_text("EDITED")   # dirty vs snapshot
-
-    app = SndeckApp(_client(_pinned_routes()), tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("s")
-        await pilot.pause()
-        await pilot.press("x")            # unpin dirty set -> confirm appears
-        await pilot.pause()
-        from sndeck.app import DeleteFilesConfirmScreen
-        assert isinstance(app.screen, DeleteFilesConfirmScreen)
-        await pilot.press("escape")       # cancel deletion
-        await pilot.pause()
-    assert st.load_state().tracked_sets == []     # tracking removed
-    assert ws.exists()                            # workspace dir preserved on cancel
+        assert isinstance(app.screen, PinnedSetsScreen)
+    assert st.load_state().tracked_sets == []
+    assert clean.is_dir() and dirty.is_dir()
+    import inspect
+    assert list(inspect.signature(PinnedSetsScreen.__init__).parameters) == ["self", "client"]
 
 
 @pytest.mark.asyncio
@@ -1350,15 +1182,9 @@ async def test_pin_downloads_only_new_set_not_existing_tracked(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_push_all_skips_drifted_but_pushes_clean(tmp_path, sn_client):
     a, b = "a" * 32, "b" * 32  # a is clean-on-instance, b drifted on instance
-    ws = set_workspace(tmp_path, _SET1, "cur")
-    ws.mkdir(parents=True, exist_ok=True)
-    for sid, nm in ((a, "BR_A"), (b, "BR_B")):
-        folder = ws / "sys_script" / f"{nm}__{sid}"
-        folder.mkdir(parents=True)
-        folder.joinpath("record.json").write_text(json.dumps(
-            {"_meta": {"table": "sys_script", "sys_id": sid, "name": nm}, "script": "orig"}))
-        folder.joinpath(".snapshot.json").write_text(json.dumps({"script": "orig"}))
-        folder.joinpath("script.js").write_text("EDITED")
+    for sys_id, nm in ((a, "BR_A"), (b, "BR_B")):
+        make_copy(tmp_path, "dev", "sys_script", nm, sys_id, target_set=_target("cur"),
+                  script="orig", dirty=True)
     writes = []
 
     def routes(table, params):
@@ -1369,7 +1195,7 @@ async def test_push_all_skips_drifted_but_pushes_clean(tmp_path, sn_client):
         if table == "sys_update_set":
             return [{"sys_id": {"value": _SET1}, "name": {"value": "cur"},
                      "state": {"value": "in progress", "display_value": "In progress"},
-                     "application": {"display_value": "Global"}}]
+                     "application": {"value": "global", "display_value": "Global"}}]
         if table == "sys_update_xml":
             return [{"name": {"value": f"sys_script_{a}"},
                      "target_name": {"display_value": "BR_A"}, "type": {"display_value": "Update"}},
@@ -1509,149 +1335,106 @@ async def test_batch_member_renders_above_base_files_and_is_marked(tmp_path):
             f"member must be visibly marked as an update set; got {child_labels[member_idx]!r}")
 
 
-@pytest.mark.asyncio
-async def test_do_push_all_aligns_scope_per_distinct_scope(tmp_path, sn_client, monkeypatch):
-    """_do_push_all must call set_current_application once per distinct scope that
-    differs from the starting aligned_scope, and must NOT re-call it for records
-    already in the aligned scope.
+def _routing_routes(sets, app_pref):
+    """sets: {sys_id: (name, raw scope)}, all in progress; every pref read returns
+    app_pref."""
+    def routes(table, params):
+        q = params.get("sysparm_query", "")
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cbonitz"}]
+        if table == "sys_user_preference":
+            return [{"value": app_pref}]
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": s}, "name": {"value": n, "display_value": n},
+                     "state": {"value": "in progress", "display_value": "In progress"},
+                     "application": {"value": sc, "display_value": sc}}
+                    for s, (n, sc) in sets.items() if s in q]
+        return []
+    return routes
 
-    Setup: two staged records — BR_A in 'global', BR_B in 'scopeX'.
-    Starting apps.current_app pref = 'global' (i.e. aligned to scope_a from the start).
-    Expected: set_current_application called exactly once — for scope_b only.
-    """
+
+async def _push_via_app(tmp_path, client, monkeypatch, copies):
+    """Press P then y with build_push_plan stubbed per copy path and the routing writes
+    recorded. copies: [(folder, sys_id, name)]. Returns (align_calls, pointer_calls)."""
     from sndeck.sync import PushPlan
+    plans = {str(folder): PushPlan("sys_script", sys_id, name, [], [], False)
+             for folder, sys_id, name in copies}
+    monkeypatch.setattr("sndeck.push.build_push_plan", lambda c, path: plans[str(path)])
+    monkeypatch.setattr("sndeck.push.apply_push", lambda c, plan: None)
+    align_calls, pointer_calls = [], []
+    monkeypatch.setattr("sndeck.push.set_current_application",
+                        lambda c, u, scope: align_calls.append(scope))
+    monkeypatch.setattr("sndeck.push.set_scope_pointer",
+                        lambda c, u, scope, sid: pointer_calls.append((scope, sid)))
+    app = SndeckApp(client, tmp_path)
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.press("P")
+        await pilot.pause()
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    return align_calls, pointer_calls
+
+
+@pytest.mark.asyncio
+async def test_do_push_all_aligns_scope_per_distinct_scope(tmp_path, monkeypatch):
+    """Push-all aligns the active scope once per scope that differs from the starting
+    apps.current_app, and aims each copy's scope pointer at its own target set."""
     a, b = "a" * 32, "b" * 32
-    scope_a, scope_b = "global", "scopeX"
+    set_a, set_b = "S" * 32, "T" * 32
+    fa = make_copy(tmp_path, "dev", "sys_script", "BR_A", a,
+                   target_set={"sys_id": set_a, "name": "Set A"}, dirty=True)
+    fb = make_copy(tmp_path, "dev", "sys_script", "BR_B", b,
+                   target_set={"sys_id": set_b, "name": "Set B"}, dirty=True)
+    client = _client(_routing_routes({set_a: ("Set A", "global"),
+                                      set_b: ("Set B", "scopeX")}, "global"))
 
-    # Build a model so scope_for_record can resolve each record's scope.
-    f_a = FileNode("sys_script", a, "BR_A", in_current_set=True, tracked=True,
-                   local=True, dirty=True, record_path=tmp_path / "fake_a")
-    f_b = FileNode("sys_script", b, "BR_B", in_current_set=True, tracked=True,
-                   local=True, dirty=True, record_path=tmp_path / "fake_b")
-    set_a = SetNode(sys_id="S"*32, name="Set A", state="in progress", is_current=True,
-                    tables=[TableNode("sys_script", "Business Rules", [f_a])],
-                    scope=scope_a, is_base=False, members=[])
-    set_b = SetNode(sys_id="T"*32, name="Set B", state="in progress", is_current=False,
-                    tables=[TableNode("sys_script", "Business Rules", [f_b])],
-                    scope=scope_b, is_base=False, members=[])
-    model = TreeModel([ScopeNode("All", [set_a, set_b])], current_set=None)
+    align, pointers = await _push_via_app(tmp_path, client, monkeypatch,
+                                          [(fa, a, "BR_A"), (fb, b, "BR_B")])
 
-    # Routes: user pref returns scope_a as starting apps.current_app.
-    def routes(table, params):
-        if table == "sys_user":
-            return [{"sys_id": "U1", "user_name": "cbonitz"}]
-        if table == "sys_user_preference":
-            return [{"value": scope_a}]
-        return []
-
-    client = sn_client(routes)
-    app = SndeckApp(client, tmp_path)
-    async with app.run_test() as pilot:
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        app._last_model = model
-
-        # Monkeypatch build_push_plan to return a stub plan per sys_id.
-        def fake_build_push_plan(client, path):
-            path = str(path)
-            if "fake_a" in path:
-                return PushPlan("sys_script", a, "BR_A", [], [], False)
-            return PushPlan("sys_script", b, "BR_B", [], [], False)
-
-        monkeypatch.setattr("sndeck.push.build_push_plan", fake_build_push_plan)
-        monkeypatch.setattr("sndeck.push.apply_push", lambda client, plan: None)
-        monkeypatch.setattr("sndeck.push.pull_record", lambda *a, **kw: None)
-
-        scope_align_calls = []
-        monkeypatch.setattr("sndeck.push.set_current_application",
-                            lambda c, u, scope: scope_align_calls.append(scope))
-        pointer_calls = []
-        monkeypatch.setattr("sndeck.push.set_scope_pointer",
-                            lambda c, u, scope, sid: pointer_calls.append((scope, sid)))
-
-        items = [
-            ("BR_A", "sys_script", str(tmp_path / "fake_a")),
-            ("BR_B", "sys_script", str(tmp_path / "fake_b")),
-        ]
-        app._do_push_all(items)
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    # set_current_application called exactly once — only for scope_b (scope_a already aligned).
-    assert scope_align_calls == [scope_b], (
-        f"Expected set_current_application called once with {scope_b!r}; "
-        f"got {scope_align_calls!r}"
-    )
-    # Each record is routed to its OWNING set's scope pointer, per record.
-    assert pointer_calls == [(scope_a, "S"*32), (scope_b, "T"*32)], (
-        f"Expected per-record scope-pointer routing to each owning set; got {pointer_calls!r}"
-    )
-
+    assert align == ["scopeX"]
+    assert pointers == [("global", set_a), ("scopeX", set_b)]
 
 
 @pytest.mark.asyncio
-async def test_do_push_all_routes_same_scope_members_to_own_sets(tmp_path, sn_client, monkeypatch):
-    """Regression: a batch with TWO Global members. Pushing a record
-    from each must point the single updateSetForScopeglobal pointer at that record's
-    OWN set right before its push — so each lands in its own member, not whichever
-    member happened to win a one-shot 'activate the batch'."""
-    from sndeck.sync import PushPlan
-    a, b = "a"*32, "b"*32
-    base_id, member_id = "P"*32, "M"*32
+async def test_do_push_all_routes_same_scope_members_to_own_sets(tmp_path, monkeypatch):
+    """Two Global copies targeting different sets: the single Global scope pointer is
+    re-aimed at each copy's own target set right before its push."""
+    a, b = "a" * 32, "b" * 32
+    base_id, member_id = "P" * 32, "M" * 32
+    fa = make_copy(tmp_path, "dev", "sys_script", "A", a,
+                   target_set={"sys_id": base_id, "name": "phase 1 scaffold"}, dirty=True)
+    fb = make_copy(tmp_path, "dev", "sys_script", "B", b,
+                   target_set={"sys_id": member_id, "name": "form inbox refresh"}, dirty=True)
+    client = _client(_routing_routes({base_id: ("phase 1 scaffold", "global"),
+                                      member_id: ("form inbox refresh", "global")}, "global"))
 
-    fa = FileNode("sys_script", a, "A", in_current_set=True, tracked=True,
-                  local=True, dirty=True, record_path=tmp_path / "fa")
-    fb = FileNode("sys_script", b, "B", in_current_set=False, tracked=True,
-                  local=True, dirty=True, record_path=tmp_path / "fb")
-    member = SetNode(sys_id=member_id, name="form inbox refresh", state="in progress",
-                     is_current=False, tables=[TableNode("sys_script", "Business Rules", [fb])],
-                     scope="global", is_base=False, members=[])
-    base = SetNode(sys_id=base_id, name="phase 1 scaffold", state="in progress",
-                   is_current=True, tables=[TableNode("sys_script", "Business Rules", [fa])],
-                   scope="global", is_base=True, members=[member])
-    model = TreeModel([ScopeNode("Global", [base])], current_set=None)
+    align, pointers = await _push_via_app(tmp_path, client, monkeypatch,
+                                          [(fa, a, "A"), (fb, b, "B")])
 
-    def routes(table, params):
-        if table == "sys_user":
-            return [{"sys_id": "U1", "user_name": "cbonitz"}]
-        if table == "sys_user_preference":
-            return [{"value": "global"}]   # already aligned to global
-        return []
+    assert pointers == [("global", base_id), ("global", member_id)]
+    assert align == []
 
-    client = sn_client(routes)
-    app = SndeckApp(client, tmp_path)
+
+@pytest.mark.asyncio
+async def test_push_confirm_excludes_other_instance_copies(tmp_path, monkeypatch):
+    """Push-all on a dev client offers only dev edit copies, never another instance's
+    dirty copy sharing the store."""
+    from sndeck.app import PushAllConfirmScreen
+    make_copy(tmp_path, "dev", "sys_script", "DevBR", sid("a"), dirty=True)
+    make_copy(tmp_path, "prod", "sys_script", "ProdBR", sid("b"), dirty=True)
+    app = SndeckApp(_make_client_for_app(), tmp_path)
     async with app.run_test() as pilot:
         await app.workers.wait_for_complete()
         await pilot.pause()
-        app._last_model = model
-
-        def fake_build_push_plan(client, path):
-            if "fa" in str(path):
-                return PushPlan("sys_script", a, "A", [], [], False)
-            return PushPlan("sys_script", b, "B", [], [], False)
-
-        monkeypatch.setattr("sndeck.push.build_push_plan", fake_build_push_plan)
-        monkeypatch.setattr("sndeck.push.apply_push", lambda client, plan: None)
-        monkeypatch.setattr("sndeck.push.pull_record", lambda *a, **kw: None)
-        align_calls = []
-        monkeypatch.setattr("sndeck.push.set_current_application",
-                            lambda c, u, scope: align_calls.append(scope))
-        pointer_calls = []
-        monkeypatch.setattr("sndeck.push.set_scope_pointer",
-                            lambda c, u, scope, sid: pointer_calls.append((scope, sid)))
-
-        app._do_push_all([
-            ("A", "sys_script", str(tmp_path / "fa")),
-            ("B", "sys_script", str(tmp_path / "fb")),
-        ])
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-    # Both records are global, so the scope pointer must be re-aimed per record.
-    assert pointer_calls == [("global", base_id), ("global", member_id)], (
-        f"each same-scope record must be routed to its own set; got {pointer_calls!r}")
-    # Already aligned to global -> no scope switch needed.
-    assert align_calls == [], f"no scope realignment expected; got {align_calls!r}"
+        captured = {}
+        monkeypatch.setattr(app, "push_screen",
+                            lambda screen, cb=None: captured.setdefault("screen", screen))
+        app.action_push()
+        assert isinstance(captured["screen"], PushAllConfirmScreen)
+        assert captured["screen"]._records == [("DevBR", "sys_script")]
 
 
 @pytest.mark.asyncio
@@ -1698,28 +1481,49 @@ async def test_refresh_local_preserves_batch_setnode_fields(tmp_path):
 
 # ── Task 9: pull-arbitrary-record (_pull_one) ─────────────────────────────────
 
-def test_pull_one_lands_in_current_set_workspace(app, tmp_path, monkeypatch):
-    from sndeck import app as appmod
-    # Current-set resolution now lives in updatesets.resolve_current_set; patch it there.
-    monkeypatch.setattr("sndeck.updatesets.current_user",
-                        lambda c: type("U", (), {"sys_id": "u", "user_name": "cb"})())
-    monkeypatch.setattr("sndeck.updatesets.current_update_set",
-                        lambda c, u: type("S", (), {"sys_id": "5"*32, "name": "talent"})())
-    pulled = {}
-    monkeypatch.setattr(appmod, "pull_record",
-                        lambda c, t, s, d: pulled.update(dir=str(d), table=t, sys_id=s))
-    app._scratch = tmp_path
-    app._pull_one("sys_script_include", "a"*32)
-    assert pulled["dir"].endswith("talent__" + "5"*32)
+def test_pull_one_creates_edit_copy_targeting_current_set(tmp_path, sn_client):
+    def routes(table, params):
+        if table == "sys_script_include":
+            return [{"sys_id": "a" * 32, "name": "talentSI", "script": "x"}]
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cb"}]
+        if table == "sys_user_preference":
+            return [{"value": "5" * 32}]
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": "5" * 32}, "name": {"value": "talent"},
+                     "state": {"value": "in progress"},
+                     "application": {"display_value": "Global"}}]
+        return []
+    app = SndeckApp(sn_client(routes), tmp_path)
+    app._pull_one("sys_script_include", "a" * 32)
+    [c] = app._store.iter_copies("dev", "edit")
+    assert (c.table, c.sys_id) == ("sys_script_include", "a" * 32)
+    assert c.target_set == {"sys_id": "5" * 32, "name": "talent"}
+
+
+def test_pull_one_off_dev_pulls_ref_copy_without_current_set(tmp_path):
+    def routes(table, params):
+        if table == "sys_script_include":
+            return [{"sys_id": "a" * 32, "name": "talentSI", "script": "x"}]
+        raise AssertionError(f"unexpected query on {table}")
+    prod = Instance("prod", "https://p.service-now.com", "cid",
+                    "https://p.service-now.com/oauth_token.do", "cbonitz@x")
+
+    def handler(req):
+        table = str(req.url.path).rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"result": routes(table, dict(req.url.params))})
+    client = TableClient(prod, FakeToken(), http=httpx.Client(transport=httpx.MockTransport(handler)))
+    app = SndeckApp(client, tmp_path)
+    app._pull_one("sys_script_include", "a" * 32)
+    assert app._store.iter_copies("prod", "edit") == []
+    [c] = app._store.iter_copies("prod", "ref")
+    assert c.sys_id == "a" * 32
 
 
 # ── Task 2: Staging pane reads from disk ──────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_staging_shows_disk_record_without_refresh(tmp_path, monkeypatch):
-    import json
-    from sndeck.records import set_workspace
-    import sndeck.records as records
     from sndeck.watcher import ScratchChanged
     from textual.widgets import DataTable, Static
 
@@ -1727,14 +1531,8 @@ async def test_staging_shows_disk_record_without_refresh(tmp_path, monkeypatch):
     async with app.run_test() as pilot:
         await pilot.pause()
         # Write a NEW dirty record straight to disk — never seen by the network model.
-        ws = set_workspace(tmp_path, "d" * 32, "Live Set")
-        folder = ws / "sys_script_include" / "NewGuy__f1"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "record.json").write_text(json.dumps(
-            {"_meta": {"table": "sys_script_include", "sys_id": "f1", "name": "NewGuy"}}),
-            encoding="utf-8")
-        # Force is_dirty True for this folder only.
-        monkeypatch.setattr(records, "is_dirty", lambda p: str(p) == str(folder))
+        folder = make_copy(tmp_path, "dev", "sys_script_include", "NewGuy", sid("f"),
+                           dirty=True)
         # Simulate a watcher tick.
         app.post_message(ScratchChanged({str(folder)}))
         await pilot.pause()
@@ -1778,21 +1576,13 @@ async def test_reconcile_preserves_expansion_and_cursor_same_structure(tmp_path,
 
 @pytest.mark.asyncio
 async def test_push_confirm_lists_disk_records(tmp_path, monkeypatch):
-    import sndeck.records as records
     from sndeck.app import PushAllConfirmScreen
 
     app = SndeckApp(_make_client_for_app(), str(tmp_path), theme_name=MACCHIATO)
     async with app.run_test() as pilot:
         await pilot.pause()
         # Write a NEW dirty record straight to disk — never seen by the network model.
-        ws = set_workspace(tmp_path, "d" * 32, "Live Set")
-        folder = ws / "sys_script" / "Pushme__p1"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "record.json").write_text(json.dumps(
-            {"_meta": {"table": "sys_script", "sys_id": "p1", "name": "Pushme"}}),
-            encoding="utf-8")
-        # Force is_dirty True for this folder only.
-        monkeypatch.setattr(records, "is_dirty", lambda p: str(p) == str(folder))
+        make_copy(tmp_path, "dev", "sys_script", "Pushme", sid("e"), dirty=True)
 
         captured = {}
         monkeypatch.setattr(app, "push_screen",
@@ -2043,8 +1833,6 @@ async def test_staging_updates_on_tick_even_with_error_model(tmp_path, monkeypat
     """_render_staging must fire on every ScratchChanged tick even when _last_model
     is an error model. Before Fix 1 the early-return in _refresh_local swallowed
     the call, freezing the staging pane during network-error state."""
-    import json
-    import sndeck.records as records
     from sndeck.tree import TreeModel
     from sndeck.watcher import ScratchChanged
     from textual.widgets import DataTable, Static
@@ -2055,15 +1843,8 @@ async def test_staging_updates_on_tick_even_with_error_model(tmp_path, monkeypat
         # Inject an error model — simulates network failure after initial load.
         app._last_model = TreeModel(scopes=[], current_set=None, error="boom")
 
-        # Write a new dirty record to disk under a per-set workspace dir.
-        ws = set_workspace(tmp_path, "e" * 32, "Error Set")
-        folder = ws / "sys_script" / f"DirtyRec__{'f' * 32}"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "record.json").write_text(json.dumps(
-            {"_meta": {"table": "sys_script", "sys_id": "f" * 32, "name": "DirtyRec"}}),
-            encoding="utf-8")
-        # Monkeypatch is_dirty to return True only for this folder.
-        monkeypatch.setattr(records, "is_dirty", lambda p: str(p) == str(folder))
+        # Write a new dirty record straight to the store.
+        folder = make_copy(tmp_path, "dev", "sys_script", "DirtyRec", "f" * 32, dirty=True)
 
         # Fire a watcher tick with the error model still in place.
         app.post_message(ScratchChanged({str(folder)}))
@@ -2163,27 +1944,221 @@ async def test_reconcile_relabels_member_set(tmp_path):
         )
 
 
+def _stub_client(instance="dev"):
+    from types import SimpleNamespace
+    return SimpleNamespace(instance=SimpleNamespace(name=instance))
+
+
 def test_app_reconciles_scratch_on_mount(monkeypatch, tmp_path):
     from sndeck import app as app_mod
 
     calls = []
     monkeypatch.setattr(app_mod, "reconcile_and_report",
-                        lambda client, root: calls.append(str(root)) or [])
+                        lambda client, store: calls.append(store.root) or [])
 
-    a = app_mod.SndeckApp(client=object(), scratch_dir=str(tmp_path))
+    a = app_mod.SndeckApp(client=_stub_client(), store_root=str(tmp_path))
     a._reconcile_scratch_once()   # the extracted hook called from on_mount
 
-    assert calls == [str(tmp_path)]
+    assert calls == [tmp_path]
 
 
 def test_app_reconcile_never_raises(monkeypatch, tmp_path):
-    from sndeck import app as app_mod, prune
+    from sndeck import app as app_mod, gc
     # reconcile_and_report owns the never-raise contract itself: make the real
-    # raiser inside it (reconcile_scratch) blow up, with no wrapper guard in
+    # raiser inside it (plan_for) blow up, with no wrapper guard in
     # app._reconcile_scratch_once backstopping it, and confirm the hook still
     # doesn't raise.
-    def boom(client, root):
+    def boom(client, store, **kw):
         raise RuntimeError("boom")
-    monkeypatch.setattr(prune, "reconcile_scratch", boom)
-    a = app_mod.SndeckApp(client=object(), scratch_dir=str(tmp_path))
+    monkeypatch.setattr(gc, "plan_for", boom)
+    a = app_mod.SndeckApp(client=_stub_client(), store_root=str(tmp_path))
     a._reconcile_scratch_once()   # must not raise
+
+def test_pull_one_refused_raises_runtime_error(tmp_path, sn_client):
+    from sndeck.app import SndeckApp
+    from storekit import make_copy
+    make_copy(tmp_path, "dev", "sys_script", "A", "111", dirty=True)
+
+    def routes(table, params):
+        if table == "sys_script":
+            return [{"sys_id": "111", "name": "A", "script": "live"}]
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "u"}]
+        if table == "sys_user_preference":
+            return [{"value": "SET1"}]
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": "SET1"}, "name": {"value": "My Set"},
+                     "state": {"value": "in progress"}, "application": {"display_value": "Global"}}]
+        return []
+    app = SndeckApp(sn_client(routes), tmp_path)
+    import pytest
+    with pytest.raises(RuntimeError, match="overwrite-local"):
+        app._pull_one("sys_script", "111")
+
+
+# ── Fix round 1: set-pull kind, refusal notices, spinner, store invariant ────
+
+def _client_on(instance, routes):
+    inst = Instance(instance, f"https://{instance}.service-now.com", "cid",
+                    f"https://{instance}.service-now.com/oauth_token.do", "cbonitz@x")
+
+    def handler(req):
+        table = str(req.url.path).rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"result": routes(table, dict(req.url.params))})
+    return TableClient(inst, FakeToken(), http=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def _set_pull_routes(sys_ids, live_script):
+    """Current set _SET1 ('cur') holds sys_script records `sys_ids`; each reads back with
+    `live_script` (empty sys_ids on a get = record missing)."""
+    def routes(table, params):
+        q = params.get("sysparm_query", "")
+        if table == "sys_user":
+            return [{"sys_id": "U1", "user_name": "cbonitz"}]
+        if table == "sys_user_preference":
+            return [{"value": _SET1}]
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": _SET1}, "name": {"value": "cur"},
+                     "state": {"value": "in progress", "display_value": "In progress"},
+                     "application": {"value": "global", "display_value": "Global"}}]
+        if table == "sys_update_xml" and "ORDERBY" not in q:
+            return [{"name": f"sys_script_{s}"} for s in sys_ids]
+        if table == "sys_script":
+            s = q.split("sys_id=", 1)[-1].split("^", 1)[0]
+            if s in sys_ids:
+                return [{"sys_id": s, "name": f"BR_{s[0]}", "script": live_script}]
+        return []
+    return routes
+
+
+def _notes(app, monkeypatch):
+    out = []
+    monkeypatch.setattr(app, "notify",
+                        lambda message, severity="information", **kw: out.append((message, severity)))
+    return out
+
+
+async def _settle(app, pilot):
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pull_all_refused_notifies_refused_count(tmp_path, monkeypatch):
+    a = sid("a")
+    make_copy(tmp_path, "dev", "sys_script", "BR_a", a, target_set=_target("cur"),
+              script="orig", dirty=True)
+    app = SndeckApp(_client(_set_pull_routes([a], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app.action_pull_set()
+        await _settle(app, pilot)
+    assert ("Pulled 0 record(s) from 'cur'  (1 refused: unpushed edits)", "warning") in notes
+
+
+@pytest.mark.asyncio
+async def test_pull_sets_on_pin_notifies_refused_total(tmp_path, monkeypatch):
+    a = sid("a")
+    make_copy(tmp_path, "dev", "sys_script", "BR_a", a, target_set=_target("cur"),
+              script="orig", dirty=True)
+    app = SndeckApp(_client(_set_pull_routes([a], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app._pull_sets([_SET1])
+        await _settle(app, pilot)
+    assert ("1 record(s) refused: unpushed edits", "warning") in notes
+
+
+@pytest.mark.asyncio
+async def test_pull_off_dev_writes_only_ref_copies(tmp_path):
+    a, b = sid("a"), sid("b")
+    app = SndeckApp(_client_on("prod", _set_pull_routes([a, b], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        app.action_pull_set()
+        await _settle(app, pilot)
+    assert app._store.iter_copies("prod", "edit") == []
+    assert {c.sys_id for c in app._store.iter_copies("prod", "ref")} == {a, b}
+
+
+@pytest.mark.asyncio
+async def test_pull_one_worker_refused_notifies_and_stops_spinner(tmp_path, monkeypatch):
+    a = sid("a")
+    make_copy(tmp_path, "dev", "sys_script", "BR_a", a, target_set=_target("cur"),
+              script="orig", dirty=True)
+    app = SndeckApp(_client(_set_pull_routes([a], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app._set_loading(True)
+        app._pull_one_worker("sys_script", a)
+        await _settle(app, pilot)
+        assert app.query_one("#tree", Tree).loading is False
+    [(msg, severity)] = notes
+    assert "overwrite-local" in msg and severity == "warning"
+
+
+@pytest.mark.asyncio
+async def test_pull_one_worker_missing_record_stops_spinner(tmp_path, monkeypatch):
+    app = SndeckApp(_client(_set_pull_routes([], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app._set_loading(True)
+        app._pull_one_worker("sys_script", sid("a"))
+        await _settle(app, pilot)
+        assert app.query_one("#tree", Tree).loading is False
+    assert notes == [(f"sys_script/{sid('a')} not found.", "error")]
+
+
+@pytest.mark.asyncio
+async def test_pull_one_worker_off_dev_reports_ref_copy_path(tmp_path, monkeypatch):
+    a = sid("a")
+    app = SndeckApp(_client_on("prod", _set_pull_routes([a], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app._pull_one_worker("sys_script", a)
+        await _settle(app, pilot)
+    [c] = app._store.iter_copies("prod", "ref")
+    assert notes == [(f"Pulled ref copy of sys_script/BR_a → {c.path}", "information")]
+
+
+@pytest.mark.asyncio
+async def test_get_record_and_legend_off_dev_say_read_only_copy(tmp_path):
+    from sndeck.app import GetRecordScreen
+    app = SndeckApp(_client_on("prod", _set_pull_routes([], "live")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        await pilot.press("g")
+        await pilot.pause()
+        assert isinstance(app.screen, GetRecordScreen)
+        title = str(app.screen.query_one("#get-record-title", Static).content)
+        assert "pull a read-only copy" in title and "stage" not in title
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        keys = " ".join(str(w.content) for w in app.screen.query(".legend-keys"))
+        assert "g get record (pull a read-only copy)" in keys and "stage" not in keys
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker", ["pull", "pull_sets", "pull_one"])
+async def test_pull_workers_report_store_invariant_error(tmp_path, monkeypatch, worker):
+    a = sid("a")
+    make_copy(tmp_path, "dev", "sys_script", "One", a, target_set=_target("cur"))
+    make_copy(tmp_path, "dev", "sys_script", "Two", a, target_set=_target("cur"))
+    app = SndeckApp(_client(_set_pull_routes([a], "gs.info('x');")), tmp_path)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        notes = _notes(app, monkeypatch)
+        app._set_loading(True)
+        {"pull": app._pull, "pull_sets": lambda: app._pull_sets([_SET1]),
+         "pull_one": lambda: app._pull_one_worker("sys_script", a)}[worker]()
+        await _settle(app, pilot)
+        assert app.query_one("#tree", Tree).loading is False
+    [(msg, severity)] = notes
+    assert "2 folders" in msg and severity == "error"

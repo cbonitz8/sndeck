@@ -3,12 +3,14 @@ owner of where a record folder lives. `snapshot.py` owns what is inside it."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from .scratch import folder_name
+from .settings import DEFAULT_STORE_ROOT
 from .snapshot import RECORD_JSON
 
 EDIT, REF = "edit", "ref"
@@ -91,10 +93,13 @@ def check_store_root(root, instance_names) -> str | None:
         return f"{p} is an instance folder inside a store; use its parent"
     if not p.is_dir():
         return None
-    for child in sorted(c for c in p.iterdir() if c.is_dir()):
-        if _SET_DIR.search(child.name):
-            return (f"{p} is a legacy per-task root (it holds set folder {child.name}); "
-                    f"point sndeck at ~/.sn-scratch and run `sndeck migrate`")
+    set_dirs = [c.name for c in sorted(p.iterdir()) if c.is_dir() and _SET_DIR.search(c.name)]
+    if set_dirs:
+        if p.resolve() == Path(os.path.expanduser(DEFAULT_STORE_ROOT)).resolve():
+            return (f"{p} holds update-set folders directly ({', '.join(set_dirs)}); "
+                    f"move them into a subfolder of {p}, then run `sndeck migrate`")
+        return (f"{p} is a legacy per-task root (it holds set folder {set_dirs[0]}); "
+                f"point sndeck at ~/.sn-scratch and run `sndeck migrate`")
     if any(p.glob(f"*/{RECORD_JSON}")) or any(p.glob(f"*/*/{RECORD_JSON}")):
         return f"{p} holds record folders directly, so it is not a store root"
     return None

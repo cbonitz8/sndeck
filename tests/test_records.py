@@ -161,45 +161,26 @@ def test_scan_workspace_ignores_untagged_top_dirs(tmp_path):
     assert scan_workspace(tmp_path) == []
 
 
-_SETA = "a" * 32
-_SETB = "b" * 32
+def test_dirty_files_from_disk_lists_only_dirty_edit_copies_of_the_instance(tmp_path):
+    from sndeck.store import Store
+    from storekit import make_copy
+    d1 = make_copy(tmp_path, "dev", "sys_script_include", "Alpha", "r1", dirty=True)
+    d2 = make_copy(tmp_path, "dev", "sys_script", "Beta", "r2", dirty=True)
+    make_copy(tmp_path, "dev", "sys_script", "Zeta", "r9")
+    make_copy(tmp_path, "dev", "sys_script", "Ref", "r3", kind="ref", dirty=True)
+    make_copy(tmp_path, "prod", "sys_script", "Other", "r4", dirty=True)
 
+    out = dirty_files_from_disk(Store(tmp_path), "dev")
 
-def test_dirty_files_from_disk_filters_and_dedupes(tmp_path, monkeypatch):
-    # Build two set workspaces on disk with record.json + _meta via set_workspace + manual write.
-    wsa = set_workspace(tmp_path, _SETA, "Set A")
-    wsb = set_workspace(tmp_path, _SETB, "Set B")
-    # Minimal record folders (record.json with _meta) — mirror scan_scratch's expectations.
-    import json
-
-    def rec(ws, table, sys_id, name):
-        # scan_scratch uses glob("*/*/record.json"), so structure is ws/table/name__sys_id/
-        folder = ws / table / f"{name}__{sys_id}"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "record.json").write_text(json.dumps(
-            {"_meta": {"table": table, "sys_id": sys_id, "name": name}}), encoding="utf-8")
-        return folder
-
-    d1 = rec(wsa, "sys_script_include", "r1", "Alpha")
-    d2 = rec(wsa, "sys_script", "r2", "Beta")
-    d3 = rec(wsb, "sys_script_include", "r1", "Alpha")  # same (table,sys_id) as d1
-    rec(wsb, "sys_script", "r9", "Zeta")
-
-    import sndeck.records as records
-    monkeypatch.setattr(records, "is_dirty", lambda p: str(p) in {str(d1), str(d2), str(d3)})
-
-    out = dirty_files_from_disk(tmp_path)
-    keys = [(f.table, f.sys_id) for f in out]
-    assert ("sys_script", "r2") in keys
-    assert ("sys_script_include", "r1") in keys
-    assert ("sys_script", "r9") not in keys          # clean, excluded
-    assert len(keys) == len(set(keys))               # deduped
-    assert keys == sorted(keys)                       # sorted by (table, sys_id-effectively via name)
-    assert all(f.dirty and f.local and f.record_path is not None for f in out)
+    assert [(f.table, f.sys_id) for f in out] == [("sys_script", "r2"),
+                                                 ("sys_script_include", "r1")]
+    assert [f.record_path for f in out] == [d2, d1]
+    assert all(f.dirty and f.local and not f.tracked for f in out)
 
 
 def test_dirty_files_from_disk_empty(tmp_path):
-    assert dirty_files_from_disk(tmp_path) == []
+    from sndeck.store import Store
+    assert dirty_files_from_disk(Store(tmp_path), "dev") == []
 
 
 def _client_routes(routes):

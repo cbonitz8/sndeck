@@ -1,5 +1,5 @@
 """Build the scope → update set → table → file tree model. Pure data, no UI.
-Content of files comes from the local scratch dir; set membership from the instance."""
+Content of files comes from the local store; set membership from the instance."""
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .auth import AuthExpiredError
 from .registry import CODE_ARTIFACTS
-from .scratch import set_workspaces
+from .store import EDIT, Store
 from .sync import is_dirty
 from .updatesets import (
     UpdateSet, batch_members, current_update_set, current_user,
@@ -86,8 +86,8 @@ def _walk_set(scope: "ScopeNode", setn: "SetNode") -> Iterator[tuple["ScopeNode"
 
 def iter_sets(model: "TreeModel | None") -> Iterator[tuple["ScopeNode", "SetNode"]]:
     """Every (scope, set) in the model — top-level sets AND their nested batch members —
-    depth-first. The one traversal of the set hierarchy; find_set / owner_of_record and
-    the model's own consumers walk through here instead of re-recursing by hand."""
+    depth-first. The one traversal of the set hierarchy; find_set and the model's own
+    consumers walk through here instead of re-recursing by hand."""
     if model is None:
         return
     for scope in model.scopes:
@@ -101,17 +101,6 @@ def find_set(model: "TreeModel | None", set_sys_id: str) -> tuple["SetNode", "Sc
     for scope, setn in iter_sets(model):
         if setn.sys_id == set_sys_id:
             return setn, scope
-    return None
-
-
-def owner_of_record(model: "TreeModel | None", table: str, sys_id: str) -> tuple[str, str] | None:
-    """(raw scope sys_id, owning set sys_id) for the set that stages (table, sys_id), at
-    any depth; None if unstaged. Drives push's per-record scope routing."""
-    for _scope, setn in iter_sets(model):
-        for tbl in setn.tables:
-            for f in tbl.files:
-                if f.table == table and f.sys_id == sys_id:
-                    return (setn.scope, setn.sys_id)
     return None
 
 
@@ -134,15 +123,17 @@ def dirty_files(model: TreeModel) -> list[FileNode]:
     return out
 
 
-def _build_set_node(meta, entries, ws_records, is_cur) -> SetNode:
-    # ws_records: dict[(table, sys_id)] -> RecordRef  (records physically in THIS set's dir)
+def _build_set_node(meta, entries, local, is_cur) -> SetNode:
+    # local: dict[(table, sys_id)] -> store.Copy (every edit copy for this instance)
     manifest = {(e.table, e.sys_id): e for e in entries}
-    keys = list(manifest) + [k for k in ws_records if k not in manifest]
+    keys = list(manifest) + [k for k, c in local.items()
+                             if k not in manifest and c.target_set is not None
+                             and c.target_set["sys_id"] == meta.sys_id]
     by_table: dict[str, list[FileNode]] = {}
     for (table, sys_id) in keys:
         e = manifest.get((table, sys_id))
-        ref = ws_records.get((table, sys_id))
-        name = e.name if e else (ref.name if ref else sys_id)
+        ref = local.get((table, sys_id))
+        name = e.name if e else ref.name
         by_table.setdefault(table, []).append(FileNode(
             table, sys_id, name,
             in_current_set=is_cur,
@@ -158,7 +149,7 @@ def _build_set_node(meta, entries, ws_records, is_cur) -> SetNode:
                    scope=meta.scope, is_base=False, members=[])
 
 
-def build_tree(client, scratch_dir, tracked_ids: list[str]) -> TreeModel:
+def build_tree(client, store: Store, tracked_ids: list[str]) -> TreeModel:
     try:
         user = current_user(client)
         if not user or not user.user_name:
@@ -171,11 +162,7 @@ def build_tree(client, scratch_dir, tracked_ids: list[str]) -> TreeModel:
                 seen_ids.add(sid)
                 set_ids.append(sid)
 
-        ws_by_set: dict[str, dict] = {}
-        for ws in set_workspaces(scratch_dir):   # one entry per on-disk set workspace
-            d = ws_by_set.setdefault(ws.set_sys_id, {})
-            for ref in ws.records:
-                d[(ref.table, ref.sys_id)] = ref
+        local = {(c.table, c.sys_id): c for c in store.iter_copies(client.instance.name, EDIT)}
 
         scope_map: dict[str, list[SetNode]] = {}
         rendered: set[str] = set()
@@ -190,8 +177,7 @@ def build_tree(client, scratch_dir, tracked_ids: list[str]) -> TreeModel:
             for m in members:
                 is_cur = cur is not None and m.sys_id == cur.sys_id
                 node = _build_set_node(
-                    m, update_set_entries(client, m.sys_id),
-                    ws_by_set.get(m.sys_id, {}), is_cur)
+                    m, update_set_entries(client, m.sys_id), local, is_cur)
                 member_nodes.append(node)
                 rendered.add(m.sys_id)
             if not member_nodes:

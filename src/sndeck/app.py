@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import threading
 import webbrowser
-from pathlib import Path
 
 from rich.text import Text
 from textual import work
@@ -15,10 +14,11 @@ from textual.widgets import DataTable, Footer, Input, Static, TextArea, Tree
 from .auth import AuthExpiredError
 from .deeplinks import instance_url_for
 from .preview import Preview, PreviewField, build_preview, read_field
-from .prune import reconcile_and_report
-from .records import pull_record, pull_set, scan_scratch, scan_workspace, set_workspace, delete_record_folders, dirty_files_from_disk
+from .gc import reconcile_and_report
+from .records import default_kind, dirty_files_from_disk, pull, pull_set_into_store
 from .registry import CODE_ARTIFACTS
 from .state import load_state
+from .store import EDIT, Store, StoreInvariantError
 from .sync import is_dirty
 from .theme import LATTE, MACCHIATO, THEMES, next_theme
 from .tree import (
@@ -98,9 +98,20 @@ class SetPickerScreen(ModalScreen):
         self.dismiss(sorted(self._new_pins))
 
 
+def _get_record_hint(instance: str) -> str:
+    """What `g` does on this instance: dev stages an edit copy, others pull a ref copy."""
+    if default_kind(instance) == EDIT:
+        return "stage into current set"
+    return "pull a read-only copy"
+
+
 class LegendScreen(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Close"), ("question_mark", "dismiss", "Close"),
                 ("q", "dismiss", "Close")]
+
+    def __init__(self, get_hint: str):
+        super().__init__()
+        self._get_hint = get_hint
 
     def compose(self) -> ComposeResult:
         with Vertical(id="legend-box"):
@@ -111,7 +122,7 @@ class LegendScreen(ModalScreen):
             yield Static("✎   local edits not pushed", classes="legend-update")
             yield Static("enter open/switch · P push all · s pinned sets · a add · o browser",
                          classes="legend-keys")
-            yield Static("p pull current set · g get record (stage into current set) · r refresh · t theme",
+            yield Static(f"p pull current set · g get record ({self._get_hint}) · r refresh · t theme",
                          classes="legend-keys")
             yield Static("[ / ] prev/next field tab · ? legend", classes="legend-keys")
             yield Static("esc / q to close", classes="legend-dismiss")
@@ -165,35 +176,17 @@ class PushAllConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
-class DeleteFilesConfirmScreen(ModalScreen):
-    BINDINGS = [("y", "confirm", "Confirm"), ("escape", "cancel", "Cancel")]
-
-    def __init__(self, count: int):
-        super().__init__()
-        self._count = count
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
-            yield Static(f"{self._count} local file(s) have unsaved edits.",
-                         classes="confirm-title")
-            yield Static("Delete them anyway? (tracking is already removed)",
-                         classes="confirm-warn")
-            yield Static("y = delete · esc = keep files", classes="confirm-keys")
-
-    def action_confirm(self) -> None:
-        self.dismiss(True)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-
 class GetRecordScreen(ModalScreen):
     """Collect (table, sys_id) from the user then dismiss with the pair."""
     BINDINGS = [("escape", "cancel", "Cancel")]
 
+    def __init__(self, get_hint: str):
+        super().__init__()
+        self._get_hint = get_hint
+
     def compose(self) -> ComposeResult:
         with Vertical(id="get-record-box"):
-            yield Static("Get record — stage into current set", id="get-record-title")
+            yield Static(f"Get record — {self._get_hint}", id="get-record-title")
             yield Input(placeholder="table  (e.g. sys_script_include)", id="get-record-table")
             yield Input(placeholder="sys_id  (32-char hex)", id="get-record-sys-id")
             yield Static("enter to confirm · esc to cancel", classes="confirm-keys")
@@ -217,6 +210,19 @@ _STATE_BADGE = {"in progress": "● in progress", "complete": "✓ complete", "i
 
 
 
+def _set_pull_message(set_name: str, summary) -> tuple[str, str]:
+    """(message, severity) for a set pull's StorePullSummary."""
+    if not (summary.pulled or summary.refused):
+        return f"'{set_name}' — nothing to pull.", "warning"
+    msg = f"Pulled {summary.pulled} record(s) from '{set_name}'"
+    if summary.skipped:
+        msg += f"  ({summary.skipped} skipped: deleted/missing)"
+    if summary.refused:
+        msg += f"  ({summary.refused} refused: unpushed edits)"
+        return msg, "warning"
+    return msg, "information"
+
+
 def _pinned_badge(meta) -> str:
     if meta is None:
         return "⚠ gone"
@@ -235,10 +241,9 @@ class PinnedSetsScreen(ModalScreen):
     # NB: switching is wired via on_data_table_row_selected (Enter), NOT a key
     # binding — a focused DataTable consumes Enter and emits RowSelected.
 
-    def __init__(self, client, scratch_dir):
+    def __init__(self, client):
         super().__init__()
         self._client = client
-        self._scratch = scratch_dir
         self._rows: list = []          # [(sys_id, meta_or_None)]
         self._states_ok = True
 
@@ -302,24 +307,9 @@ class PinnedSetsScreen(ModalScreen):
         sel = self._selected()
         if not sel:
             return
-        sid, meta = sel
-        _state.unpin(sid)                       # tracking removed either way
-        # Find the per-set workspace dir by sys_id suffix (robust to server-side rename).
-        set_dir = next((p for p in Path(self._scratch).glob(f"*__{sid}") if p.is_dir()), None)
-        if set_dir is None:
-            self._load()
-            return
-        paths = [ref.path for ref in scan_scratch(set_dir)]
-        dirty = [p for p in paths if is_dirty(p)]
-        if dirty:
-            def after(confirmed: bool) -> None:
-                if confirmed:
-                    delete_record_folders([set_dir])
-                self._load()
-            self.app.push_screen(DeleteFilesConfirmScreen(len(dirty)), after)
-        else:
-            delete_record_folders([set_dir])
-            self._load()
+        sid, _meta = sel
+        _state.unpin(sid)
+        self._load()
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -348,10 +338,11 @@ class SndeckApp(App):
         th = by.get(getattr(self, "_initial_theme", MACCHIATO)) or by[MACCHIATO]
         return dict(th.variables)
 
-    def __init__(self, client, scratch_dir, theme_name: str = MACCHIATO):
+    def __init__(self, client, store_root, theme_name: str = MACCHIATO):
         super().__init__()
         self._client = client
-        self._scratch = Path(scratch_dir)
+        self._store = Store(store_root)
+        self._instance = client.instance.name
         self._initial_theme = theme_name
         self._last_model: TreeModel | None = None
         self._node_files: dict = {}  # tree node id -> FileNode
@@ -392,14 +383,16 @@ class SndeckApp(App):
         self._start_watcher()
 
     def _reconcile_scratch_once(self) -> None:
-        """Best-effort scratch prune on startup; surface report via log, never raise."""
-        for line in reconcile_and_report(self._client, self._scratch):
+        """Best-effort store cleanup on startup; surface report via log, never raise."""
+        for line in reconcile_and_report(self._client, self._store):
             self.log(line)
 
     def _start_watcher(self) -> None:
+        watch_dir = self._store.instance_dir(self._instance)
+        watch_dir.mkdir(parents=True, exist_ok=True)
         t = threading.Thread(
             target=watch_scratch,
-            args=(self, str(self._scratch)),
+            args=(self, str(watch_dir)),
             kwargs={"stop": lambda: not self.is_running},
             daemon=True,
             name="sndeck-watcher",
@@ -421,8 +414,8 @@ class SndeckApp(App):
         if model is None or model.error:
             return
 
-        local_map = {(w.set_sys_id, w.ref.table, w.ref.sys_id): w.ref
-                     for w in scan_workspace(self._scratch)}
+        local_map = {(c.table, c.sys_id): c
+                     for c in self._store.iter_copies(self._instance, EDIT)}
 
         new_scopes = []
         for scope in model.scopes:
@@ -435,7 +428,7 @@ class SndeckApp(App):
                 for tbl in setn.tables:
                     new_files = []
                     for f in tbl.files:
-                        ref = local_map.get((setn.sys_id, f.table, f.sys_id))
+                        ref = local_map.get((f.table, f.sys_id))
                         new_files.append(FileNode(
                             f.table, f.sys_id, f.name,
                             in_current_set=f.in_current_set,
@@ -475,7 +468,7 @@ class SndeckApp(App):
     def _render_staging(self) -> None:
         """Rebuild the staging pane from disk so newly pulled/added records appear live
         on a watcher tick. Preserves the highlighted row across rebuilds."""
-        files = dirty_files_from_disk(self._scratch)
+        files = dirty_files_from_disk(self._store, self._instance)
         try:
             header = self.query_one("#staging-header", Static)
             tbl = self.query_one("#staging-table", DataTable)
@@ -642,7 +635,7 @@ class SndeckApp(App):
         self._node_files.clear()
         name = model.current_set.name if model.current_set else "(none)"
         self.query_one("#info-main", Static).update(
-            f"◈ [dim]CURRENT SET[/] [b]{name}[/]   [dim]SCRATCH[/] {self._scratch}")
+            f"◈ [dim]CURRENT SET[/] [b]{name}[/]   [dim]STORE[/] {self._store.root}")
 
         tree = self.query_one("#tree", Tree)
         th = self.current_theme
@@ -694,7 +687,7 @@ class SndeckApp(App):
         # Scope list matches: refresh info bar, then reconcile each scope's set list.
         name = model.current_set.name if model.current_set else "(none)"
         self.query_one("#info-main", Static).update(
-            f"◈ [dim]CURRENT SET[/] [b]{name}[/]   [dim]SCRATCH[/] {self._scratch}")
+            f"◈ [dim]CURRENT SET[/] [b]{name}[/]   [dim]STORE[/] {self._store.root}")
         scope_nodes = [n for n in tree.root.children]   # one per scope, in order
         for scope, snode in zip(model.scopes, scope_nodes):
             self._reconcile_set_list(snode, scope.sets)
@@ -778,7 +771,7 @@ class SndeckApp(App):
     @work(thread=True, exclusive=True, group="fetch")
     def _fetch(self) -> None:
         tracked = load_state().tracked_sets
-        model = build_tree(self._client, self._scratch, tracked)
+        model = build_tree(self._client, self._store, tracked)
         self.call_from_thread(self._render_tree, model)
 
     def action_refresh(self) -> None:
@@ -820,54 +813,62 @@ class SndeckApp(App):
                                       severity="warning")
                 self.call_from_thread(self._set_loading, False)
                 return
-            summary = pull_set(self._client, self._scratch, cur.sys_id, cur.name)
-            msg = (f"Pulled {summary.pulled} record(s) from '{cur.name}'"
-                   + (f"  ({summary.skipped} skipped: deleted/missing)" if summary.skipped else "")) \
-                  if summary.pulled else f"'{cur.name}' — nothing to pull."
-            self.call_from_thread(self.notify, msg,
-                                  severity="information" if summary.pulled else "warning")
+            summary = pull_set_into_store(self._client, self._store, cur.sys_id, cur.name,
+                                          kind=default_kind(self._instance))
+            msg, severity = _set_pull_message(cur.name, summary)
+            self.call_from_thread(self.notify, msg, severity=severity)
             tracked = load_state().tracked_sets
-            model = build_tree(self._client, self._scratch, tracked)
+            model = build_tree(self._client, self._store, tracked)
             self.call_from_thread(self._render_tree, model)
-        except AuthExpiredError as e:
-            self.call_from_thread(self.notify, str(e), severity="error")
-            self.call_from_thread(self._set_loading, False)
+        except (AuthExpiredError, StoreInvariantError) as e:
+            self._pull_failed(str(e), "error")
 
     def action_pull_set(self) -> None:
         self._set_loading(True)
         self._pull()
 
-    def _pull_one(self, table: str, sys_id: str) -> None:
-        """Pull a single record into the current set's workspace.
+    def _pull_failed(self, message: str, severity: str) -> None:
+        """Worker-thread failure path: notify and stop the tree spinner."""
+        self.call_from_thread(self.notify, message, severity=severity)
+        self.call_from_thread(self._set_loading, False)
 
-        Pure logic — no Textual worker or notify calls so it is unit-testable
-        synchronously.  Raises on failure:
-          - ValueError("no-current-set") if there is no active update set.
-          - LookupError (propagated from pull_record) if the record is not found.
-        Callers that need a tree refresh (e.g. _pull_one_worker) are responsible
-        for triggering it after this returns.
-        """
-        _user, cur = resolve_current_set(self._client)
-        if not cur:
-            raise ValueError("no-current-set")
-        ws = set_workspace(self._scratch, cur.sys_id, cur.name)
-        pull_record(self._client, table, sys_id, ws)
+    def _pull_one(self, table: str, sys_id: str):
+        """Pull one record's local copy and return its PullOutcome. Raises
+        ValueError("no-current-set") for an edit pull with no current set, LookupError if
+        the record is missing, RuntimeError with the refusal reason when unpushed edits
+        block the refresh."""
+        kind = default_kind(self._instance)
+        target = None
+        if kind == EDIT:
+            _user, cur = resolve_current_set(self._client)
+            if not cur:
+                raise ValueError("no-current-set")
+            target = {"sys_id": cur.sys_id, "name": cur.name}
+        o = pull(self._client, self._store, table, sys_id, kind=kind, target_set=target)
+        if o.action == "refused":
+            raise RuntimeError(o.reason)
+        return o
 
     @work(thread=True, group="pull")
     def _pull_one_worker(self, table: str, sys_id: str) -> None:
         try:
-            self._pull_one(table, sys_id)
-            model = build_tree(self._client, self._scratch, load_state().tracked_sets)
-            self.call_from_thread(self._render_tree, model)
+            o = self._pull_one(table, sys_id)
+            model = build_tree(self._client, self._store, load_state().tracked_sets)
         except ValueError:
-            self.call_from_thread(self.notify, "No current set to stage into.",
-                                  severity="warning")
+            self._pull_failed("No current set to stage into.", "warning")
+            return
         except LookupError:
-            self.call_from_thread(self.notify, f"{table}/{sys_id} not found.",
-                                  severity="error")
-        except AuthExpiredError as e:
-            self.call_from_thread(self.notify, str(e), severity="error")
-            self.call_from_thread(self._set_loading, False)
+            self._pull_failed(f"{table}/{sys_id} not found.", "error")
+            return
+        except RuntimeError as e:
+            self._pull_failed(str(e), "warning")
+            return
+        except (AuthExpiredError, StoreInvariantError) as e:
+            self._pull_failed(str(e), "error")
+            return
+        self.call_from_thread(self.notify, f"Pulled {o.kind} copy of {table}/{o.name} → {o.path}",
+                              severity="information")
+        self.call_from_thread(self._render_tree, model)
 
     def action_get_record(self) -> None:
         def after(result) -> None:
@@ -875,7 +876,7 @@ class SndeckApp(App):
                 table, sys_id = result
                 self._set_loading(True)
                 self._pull_one_worker(table, sys_id)
-        self.push_screen(GetRecordScreen(), after)
+        self.push_screen(GetRecordScreen(_get_record_hint(self._instance)), after)
 
     def _set_write_indicator(self, on: bool) -> None:
         self.query_one("#info-app", Static).update("[WRITE]" if on else "[READ-ONLY]")
@@ -887,7 +888,7 @@ class SndeckApp(App):
                 self._open_switch_confirm(sid, name)
             else:
                 self.action_refresh()   # pins/files may have changed -> rebuild tree
-        self.push_screen(PinnedSetsScreen(self._client, self._scratch), after)
+        self.push_screen(PinnedSetsScreen(self._client), after)
 
     def _open_switch_confirm(self, set_sys_id: str, set_name: str) -> None:
         self._set_write_indicator(True)
@@ -919,7 +920,7 @@ class SndeckApp(App):
             self._activate_or_switch(set_sys_id, set_name)
             self.call_from_thread(self.notify, f"Switched to '{set_name}'.",
                                   severity="information")
-            model = build_tree(self._client, self._scratch, load_state().tracked_sets)
+            model = build_tree(self._client, self._store, load_state().tracked_sets)
             self.call_from_thread(self._render_tree, model)
         except AuthExpiredError as e:
             self.call_from_thread(self.notify, str(e), severity="error")
@@ -927,7 +928,7 @@ class SndeckApp(App):
             self.call_from_thread(self.notify, f"Switch failed: {e}", severity="error")
 
     def action_push(self) -> None:
-        files = dirty_files_from_disk(self._scratch)
+        files = dirty_files_from_disk(self._store, self._instance)
         if not files:
             self.notify("Nothing to push — no local edits.", severity="information")
             return
@@ -948,7 +949,7 @@ class SndeckApp(App):
         then surface notifications and refresh the tree. Write logic lives in push.py."""
         from .push import push_all
         try:
-            outcomes = push_all(self._client, self._last_model, [p for (_n, _t, p) in items])
+            outcomes = push_all(self._client, [p for (_n, _t, p) in items])
         except AuthExpiredError as e:
             self.call_from_thread(self.notify, str(e), severity="error")
             return
@@ -969,7 +970,7 @@ class SndeckApp(App):
             msg += f" · skipped {len(skipped)} ({', '.join(skipped)})"
         self.call_from_thread(self.notify, msg,
                               severity="information" if pushed else "warning")
-        model = build_tree(self._client, self._scratch, load_state().tracked_sets)
+        model = build_tree(self._client, self._store, load_state().tracked_sets)
         self.call_from_thread(self._render_tree, model)
 
     def _lang_for(self, path) -> str | None:
@@ -1092,7 +1093,7 @@ class SndeckApp(App):
         self._apply_editor_theme()
 
     def action_legend(self) -> None:
-        self.push_screen(LegendScreen())
+        self.push_screen(LegendScreen(_get_record_hint(self._instance)))
 
     def action_add_set(self) -> None:
         def after(new_pins) -> None:
@@ -1103,11 +1104,18 @@ class SndeckApp(App):
     @work(thread=True, exclusive=True, group="pull")
     def _pull_sets(self, sys_ids: list) -> None:
         try:
+            kind = default_kind(self._instance)
+            refused = 0
             for sid in sys_ids:
                 meta = update_set_meta(self._client, sid)
-                pull_set(self._client, self._scratch, sid, meta.name if meta else sid)
-            model = build_tree(self._client, self._scratch, load_state().tracked_sets)
+                summary = pull_set_into_store(self._client, self._store, sid,
+                                              meta.name if meta else sid, kind=kind)
+                refused += summary.refused
+            if refused:
+                self.call_from_thread(self.notify,
+                                      f"{refused} record(s) refused: unpushed edits",
+                                      severity="warning")
+            model = build_tree(self._client, self._store, load_state().tracked_sets)
             self.call_from_thread(self._render_tree, model)
-        except AuthExpiredError as e:
-            self.call_from_thread(self.notify, str(e), severity="error")
-            self.call_from_thread(self._set_loading, False)
+        except (AuthExpiredError, StoreInvariantError) as e:
+            self._pull_failed(str(e), "error")

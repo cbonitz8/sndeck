@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .registry import CODE_ARTIFACTS
 from .snapshot import RECORD_JSON, _norm, field_file, is_dirty_or_unreadable, local_diff, write_meta_extra
+from .records import default_kind
 from .store import ATTIC_DIR, EDIT, Store
 
 _SET_DIR = re.compile(r"__(?P<sysid>[0-9a-f]{32})$")
@@ -99,7 +100,28 @@ def _bodies(c: LegacyCopy) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _plan_non_edit_group(instance: str, group: list[LegacyCopy], lookups) -> list[MigrationStep]:
+    """A group resolved to an instance whose copies are references: migrate never creates
+    an edit copy there, so a clean copy is dropped and an unpushed edit goes to the attic."""
+    live = lookups.live_fields(instance, group[0].table, group[0].sys_id)
+    steps: list[MigrationStep] = []
+    for c in group:
+        if c.dirty:
+            steps.append(MigrationStep(
+                "attic", c, instance, None,
+                f"unpushed edit against {instance}; edit copies on {instance} need `pull --edit`",
+                local_diff(c.path, {} if live is None else live)))
+        else:
+            steps.append(MigrationStep(
+                "drop", c, instance, None,
+                f"read copy from {instance}; re-pull with `sndeck pull --ref`"))
+    return steps
+
+
 def _plan_group(instance: str, group: list[LegacyCopy], lookups) -> list[MigrationStep]:
+    if default_kind(instance) != EDIT:
+        return _plan_non_edit_group(instance, group, lookups)
+
     def meta(c):
         return lookups.set_meta(instance, c.set_sys_id) if c.set_sys_id else None
 

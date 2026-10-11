@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from sndeck import refresh, sync
 from sndeck.registry import field_extension
+from sndeck.store import Store
 
 HEX = "0123456789abcdef0123456789abcdef"  # 32 hex
 
@@ -164,19 +166,29 @@ def test_missing_outcome_touches_nothing(tmp_path):
 
 class _FakeClient:
     """get_record by (table, sys_id); None => record was deleted upstream."""
+    instance = SimpleNamespace(name="dev")
+
     def __init__(self, records):
         self._records = records
     def get_record(self, table, sys_id, **kw):
         return self._records.get((table, sys_id))
 
 
+def _copy(root, name, sysid, *, local, snapshot):
+    """An edit copy on dev whose target set has shipped; the CLI refreshes regardless."""
+    from storekit import make_copy
+    folder = make_copy(root, "dev", "sys_script", name, sysid, script=snapshot,
+                       target_set={"sys_id": "1" + HEX[1:], "name": "shipped"})
+    (folder / f"script{_ext()}").write_text(local)
+    return folder
+
+
 def test_cmd_refresh_single_resolves_and_exits_zero(tmp_path, capsys):
     from sndeck import cli
-    ws = _set_dir(tmp_path, "shipped", "1" + HEX[1:])
-    _make_record(ws, "sys_script", "R", "a" * 32,
-                 local={"script": "NEW"}, snapshot={"script": "OLD"})
+    _copy(tmp_path, "R", "a" * 32, local="NEW", snapshot="OLD")
     client = _FakeClient({("sys_script", "a" * 32): {"script": "NEW", "sys_id": "a" * 32}})
-    rc = cli.cmd_refresh(client, tmp_path, "sys_script", "a" * 32, False, False, as_json=True)
+    rc = cli.cmd_refresh(client, Store(tmp_path), "sys_script", "a" * 32, False, False,
+                         as_json=True)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out[0]["refreshed"] and out[0]["clean_after"]
@@ -184,34 +196,39 @@ def test_cmd_refresh_single_resolves_and_exits_zero(tmp_path, capsys):
 
 def test_cmd_refresh_single_refused_exits_one(tmp_path, capsys):
     from sndeck import cli
-    ws = _set_dir(tmp_path, "shipped", "1" + HEX[1:])
-    _make_record(ws, "sys_script", "R", "a" * 32,
-                 local={"script": "LOCAL_EDIT"}, snapshot={"script": "OLD"})
+    _copy(tmp_path, "R", "a" * 32, local="LOCAL_EDIT", snapshot="OLD")
     client = _FakeClient({("sys_script", "a" * 32): {"script": "INSTANCE"}})
-    rc = cli.cmd_refresh(client, tmp_path, "sys_script", "a" * 32, False, False, as_json=True)
+    rc = cli.cmd_refresh(client, Store(tmp_path), "sys_script", "a" * 32, False, False,
+                         as_json=True)
     assert rc == 1
 
 
 def test_cmd_refresh_not_found_exits_one(tmp_path):
     from sndeck import cli
-    _set_dir(tmp_path, "shipped", "1" + HEX[1:])
     client = _FakeClient({})
-    rc = cli.cmd_refresh(client, tmp_path, "sys_script", "z" * 32, False, False, as_json=True)
+    rc = cli.cmd_refresh(client, Store(tmp_path), "sys_script", "z" * 32, False, False,
+                         as_json=True)
     assert rc == 1
+
+
+def test_cmd_refresh_record_deleted_upstream_exits_one(tmp_path, capsys):
+    from sndeck import cli
+    _copy(tmp_path, "R", "a" * 32, local="v", snapshot="v")
+    rc = cli.cmd_refresh(_FakeClient({}), Store(tmp_path), "sys_script", "a" * 32, False,
+                         False, as_json=True)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out[0]["missing"] is True
 
 
 def test_cmd_refresh_all_is_best_effort_zero(tmp_path, capsys):
     from sndeck import cli
-    ws = _set_dir(tmp_path, "shipped", "1" + HEX[1:])
-    _make_record(ws, "sys_script", "Clean", "a" * 32,
-                 local={"script": "NEW"}, snapshot={"script": "OLD"})       # will resolve
-    _make_record(ws, "sys_script", "Diverged", "b" * 32,
-                 local={"script": "LOCAL"}, snapshot={"script": "OLD"})     # will refuse
+    _copy(tmp_path, "Clean", "a" * 32, local="NEW", snapshot="OLD")        # will resolve
+    _copy(tmp_path, "Diverged", "b" * 32, local="LOCAL", snapshot="OLD")   # will refuse
     client = _FakeClient({
         ("sys_script", "a" * 32): {"script": "NEW"},
         ("sys_script", "b" * 32): {"script": "INSTANCE"},
     })
-    rc = cli.cmd_refresh(client, tmp_path, None, None, True, False, as_json=True)
+    rc = cli.cmd_refresh(client, Store(tmp_path), None, None, True, False, as_json=True)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     by_name = {o["name"]: o for o in out}

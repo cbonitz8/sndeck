@@ -143,16 +143,20 @@ class StorePullSummary:
     skipped: int
 
 
-def pull_set_into_store(client, store: Store, set_sys_id: str, set_name: str) -> StorePullSummary:
-    """Edit-pull every record the set holds, targeting that set. A record that already
-    has an edit copy keeps its own target_set."""
+def pull_set_into_store(client, store: Store, set_sys_id: str, set_name: str, *,
+                        kind: str) -> StorePullSummary:
+    """Pull every record the set holds as `kind` copies. Edit copies target that set; a
+    record that already has an edit copy keeps its own target_set."""
     from .updatesets import update_set_records
     _total, recs = update_set_records(client, set_sys_id)
-    target = {"sys_id": set_sys_id, "name": set_name}
+    if kind == EDIT:
+        target = {"sys_id": set_sys_id, "name": set_name}
+    else:
+        target = None
     pulled = refused = skipped = 0
     for table, sys_id in recs:
         try:
-            o = pull(client, store, table, sys_id, kind=EDIT, target_set=target)
+            o = pull(client, store, table, sys_id, kind=kind, target_set=target)
         except LookupError:
             skipped += 1
             continue
@@ -186,28 +190,14 @@ def pull_set(client, scratch_dir, set_sys_id: str, set_name: str) -> PullSummary
     return PullSummary(pulled, skipped)
 
 
-def dirty_files_from_disk(scratch) -> list:
-    """Every locally-edited, unpushed record on disk — the staging set, sourced purely
-    from the scratch dir with no network model. Deduped by (table, sys_id), sorted by
-    (table, name). Feeds the staging pane and push-all so newly pulled/added records
-    appear without a full refresh."""
+def dirty_files_from_disk(store: Store, instance: str) -> list:
+    """Every dirty edit copy for `instance` — the staging set, read from disk alone.
+    Sorted by (table, name). Feeds the staging pane and push-all so newly pulled
+    records appear without a full refresh."""
     from .tree import FileNode          # local import: tree imports records at module top
-
-    seen: set[tuple[str, str]] = set()
-    out = []
-    for wref in scan_workspace(scratch):
-        ref = wref.ref
-        key = (ref.table, ref.sys_id)
-        if key in seen:
-            continue
-        if not is_dirty(ref.path):
-            continue
-        seen.add(key)
-        out.append(FileNode(
-            table=ref.table, sys_id=ref.sys_id, name=ref.name,
-            in_current_set=False, tracked=False, local=True, dirty=True,
-            record_path=ref.path,
-        ))
+    out = [FileNode(table=c.table, sys_id=c.sys_id, name=c.name, in_current_set=False,
+                    tracked=False, local=True, dirty=True, record_path=c.path)
+           for c in store.iter_copies(instance, EDIT) if is_dirty(c.path)]
     out.sort(key=lambda f: (f.table, f.name))
     return out
 

@@ -200,3 +200,21 @@ def test_existing_destination_refuses_before_writing(tmp_path):
         apply_migration(steps, s, date(2026, 10, 20))
     assert a.exists() and b.exists()
     assert not (pre.parent / f"set__{S_IP2}").exists()
+
+
+def test_group_resolved_to_prod_never_becomes_an_edit_copy(tmp_path):
+    _legacy(tmp_path, "t1", S_IP)
+    _legacy(tmp_path, "t2", S_IP2, dirty=True)
+    lk = FakeLookups(sets={S_IP: ["prod"], S_IP2: ["prod"]},
+                     states={("prod", S_IP): ("in progress", "Live"),
+                             ("prod", S_IP2): ("in progress", "Live 2")},
+                     live={("prod", "sys_script", "111"): {"script": "live"}})
+    steps = plan_migration(find_legacy(_root(tmp_path), ["dev", "prod"]), lk)
+    by_action = {s.action: s for s in steps}
+    assert sorted(by_action) == ["attic", "drop"]
+    assert not by_action["drop"].copy.dirty
+    assert "read copy from prod" in by_action["drop"].reason
+    assert "sndeck pull --ref" in by_action["drop"].reason
+    assert by_action["attic"].copy.dirty and by_action["attic"].instance == "prod"
+    assert "unpushed edit against prod" in by_action["attic"].reason
+    assert "+gs.info" in by_action["attic"].diff and "-live" in by_action["attic"].diff

@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sndeck.gc import apply_gc, format_gc_report, plan_gc, reconcile_and_report
+from sndeck.gc import apply_gc, format_gc_report, plan_for, plan_gc, reconcile_and_report
 from sndeck.store import Store
 from storekit import SET_A, make_copy, make_legacy, sid
 
@@ -155,3 +155,17 @@ def test_non_date_attic_folder_skipped(tmp_path):
     (tmp_path / "dev" / "_attic" / "2026-09-01").mkdir()
     acts = plan_gc(Store(tmp_path), "dev", {}, _live(""), NOW, attic_older_than_days=30)
     assert _classes(acts) == [("C6", "2026-09-01")]
+
+
+def test_plan_for_reads_set_states_and_attic_threshold_from_client(tmp_path, sn_client):
+    make_copy(tmp_path, "dev", "sys_script", "A", "111")
+    (tmp_path / "dev" / "_attic" / "2026-01-01").mkdir(parents=True)
+
+    def routes(table, params):
+        if table == "sys_update_set":
+            return [{"sys_id": {"value": SET_A["sys_id"]}, "name": {"value": "Set A"},
+                     "state": {"value": "complete"}, "application": {"display_value": "Global"}}]
+        return []
+    actions = plan_for(sn_client(routes), Store(tmp_path), attic_older_than_days=7)
+    assert sorted(a.cls for a in actions) == ["C1", "C6"]
+    assert [a.cls for a in plan_for(sn_client(routes), Store(tmp_path))] == ["C1"]
