@@ -74,7 +74,7 @@ class Store:
             if tdir.name.startswith("_"):
                 continue
             for rj in sorted(tdir.glob(f"*/{RECORD_JSON}")):
-                meta = json.loads(rj.read_text()).get("_meta", {})
+                meta = json.loads(rj.read_text())["_meta"]
                 if meta.get("instance") != instance or meta.get("kind") != kind:
                     continue
                 out.append(Copy(instance, kind, meta["table"], meta["sys_id"], meta["name"],
@@ -104,6 +104,6 @@ def count_legacy(root) -> int:
     """Record folders under `root` whose _meta has no instance — the old layout."""
     n = 0
     for rj in Path(root).rglob(RECORD_JSON):
-        if "instance" not in json.loads(rj.read_text()).get("_meta", {}):
+        if "instance" not in json.loads(rj.read_text())["_meta"]:
             n += 1
     return n
