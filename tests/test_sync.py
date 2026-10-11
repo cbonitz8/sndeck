@@ -7,14 +7,8 @@ from storekit import make_copy
 
 def _make_record(tmp_path, table, fields, snapshot):
     """A store edit copy whose snapshot and extracted field files are set explicitly."""
-    folder = make_copy(tmp_path, "dev", table, "Rec", "a" * 32)
-    (folder / "script.js").unlink()
-    (folder / "record.json").write_text(json.dumps(
-        {"_meta": json.loads((folder / "record.json").read_text())["_meta"], **snapshot}))
-    (folder / ".snapshot.json").write_text(json.dumps(snapshot))
-    for f, val in fields.items():
-        (folder / f"{f}{field_extension(f)}").write_text(val)
-    return folder
+    files = {f"{f}{field_extension(f)}": val for f, val in fields.items()}
+    return make_copy(tmp_path, "dev", table, "Rec", "a" * 32, fields=snapshot, files=files)
 
 
 def test_no_changes_when_local_matches_snapshot(tmp_path):

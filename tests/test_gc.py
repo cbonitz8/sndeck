@@ -169,3 +169,25 @@ def test_plan_for_reads_set_states_and_attic_threshold_from_client(tmp_path, sn_
     actions = plan_for(sn_client(routes), Store(tmp_path), attic_older_than_days=7)
     assert sorted(a.cls for a in actions) == ["C1", "C6"]
     assert [a.cls for a in plan_for(sn_client(routes), Store(tmp_path))] == ["C1"]
+
+
+def test_reconcile_and_report_auto_deletes_only_clean_shipped_copies(tmp_path, sn_client):
+    clean = make_copy(tmp_path, "dev", "sys_script", "Clean", sid("1"), target_set=SET_B)
+    dirty = make_copy(tmp_path, "dev", "sys_script", "Dirty", sid("2"), target_set=SET_B,
+                      dirty=True)
+    expired = make_copy(tmp_path, "dev", "sys_script", "Old", sid("3"), kind="ref",
+                        pulled_at="2026-01-01T00:00:00+00:00")
+
+    def routes(table, params):
+        if table == "sys_update_set":
+            return [{"sys_id": SET_B["sys_id"], "name": "Set B", "state": "complete",
+                     "application": "Global"}]
+        if table == "sys_script":
+            return [{"sys_id": sid("2"), "script": "live differs"}]
+        return []
+
+    lines = reconcile_and_report(sn_client(routes), Store(tmp_path))
+
+    assert not clean.exists()
+    assert dirty.exists() and expired.exists()
+    assert any("Clean" in line and "removed" in line for line in lines)

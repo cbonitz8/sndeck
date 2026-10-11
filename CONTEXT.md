@@ -49,9 +49,9 @@ record folder holds:
 - `local.diff` — only inside an attic folder: the unpushed edit gc preserved.
 
 **Dirty** — a record is dirty when a code field's local file differs from its snapshot
-baseline (newline-normalized). `snapshot.is_dirty` is the one predicate the staging pane,
-push, gc, and refresh all share; a copy whose `.snapshot.json` cannot be read counts as
-dirty (`is_dirty_or_unreadable`). `store.py` owns *where* a record folder lives;
+baseline (newline-normalized). `snapshot.is_dirty` answers "is there an edit worth pushing" for the staging pane, push and
+status; `snapshot.is_dirty_or_unreadable` answers "is it safe to delete" for gc and migrate,
+and counts a copy whose `.snapshot.json` cannot be read as dirty. `store.py` owns *where* a record folder lives;
 `snapshot.py` owns *what* is inside it.
 
 ## Operations
@@ -82,7 +82,7 @@ dirty (`is_dirty_or_unreadable`). `store.py` owns *where* a record folder lives;
   | C5 | ref copy older than 14 days | delete | `gc --apply` |
   | C6 | attic day folder older than N days | delete | `gc --apply --attic-older-than N` |
 
-  The **auto subset** (C1, C2) runs best-effort on `status`/`ls`. `N` must be at least 1 and
+  The **auto subset** (C1, C2) runs best-effort on `status`, `us ls` and TUI start. `N` must be at least 1 and
   today's attic folder is never deleted. An unreadable `.snapshot.json` counts as dirty. A
   second attic move for the same record on the same day lands in a `-2` sibling folder.
 - **migrate** — one-time conversion of the legacy per-task, per-set layout into the store

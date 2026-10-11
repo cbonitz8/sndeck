@@ -60,7 +60,7 @@ and a copy that belongs to a different instance. After a push the copy is re-bas
 the live record. `status` groups edit copies by target set, with a "no target set" group for
 copies that need a `retarget`.
 
-**`gc` — cleaning the store.** `status`/`ls` also run the *auto* part of `gc`: an edit copy
+**`gc` — cleaning the store.** `status`, `us ls` and TUI start also run the *auto* part of `gc`: an edit copy
 whose target set has shipped (complete/ignore) is deleted when it is clean or every edit is
 already live. `sndeck gc` is a dry run that lists the rest; `--apply` also moves a shipped
 copy with a real unpushed edit into `_attic/<date>/` with a `local.diff`, and deletes
@@ -78,13 +78,13 @@ dropped and a dirty one goes to the attic.
 **`refresh` — clearing "phantom dirty".** A record is *dirty* purely when its local field
 files differ from its frozen `.snapshot.json` baseline. If a record's local files end up
 matching the instance while the snapshot does not — e.g. it was pushed via a *different*
-update set, or its set was marked complete before the push — the folder stays dirty
-forever: `gc` keeps it (it is never one of the auto classes), and it can't be re-pulled
-because a re-pull refuses to overwrite an unpushed edit. `refresh` is the way out — it re-reads the live record
-and rebases that copy's `.snapshot.json` **regardless of the target set's state and
-without needing it to be current**. Once the snapshot matches, the record goes clean and
-`gc` reaps it on the next `status`. Use this instead of hand-editing `.snapshot.json` or
-deleting the folder by hand.
+update set — the copy keeps showing as an unpushed edit while its target set is in progress.
+Once the set ships, `gc` deletes it as already-live (class C2), and a re-pull also clears it
+(pull blocks only fields that are dirty *and* differ from the instance). `refresh` is the
+way out without waiting: it re-reads the live record and rebases that copy's
+`.snapshot.json` **regardless of the target set's state and without needing it to be
+current**. Once the snapshot matches, the record goes clean. Use this instead of
+hand-editing `.snapshot.json` or deleting the folder by hand.
 
 - `sndeck refresh <table> <id>` — snapshot-only. Finds the instance's edit copy and
   rebases its snapshot. This is also the fix for

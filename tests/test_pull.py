@@ -32,9 +32,12 @@ def test_missing_record_raises_lookup(tmp_path, sn_client):
 
 
 def test_first_pull_creates_edit_copy(tmp_path, sn_client):
-    rec = {"sys_id": "111", "name": "My BR", "script": "a"}
+    rec = {"sys_id": "111", "name": "My BR", "script": "a", "when": "after"}
     o = pull(_client(sn_client, rec), Store(tmp_path), "sys_script", "111",
              kind=EDIT, target_set=SET_A)
+    body = json.loads((o.path / "record.json").read_text())
+    assert body["when"] == "after" and body["script"] == "a"
+    assert json.loads((o.path / ".snapshot.json").read_text())["when"] == "after"
     assert o.action == "created" and o.target_set == SET_A
     assert o.path == tmp_path / "dev" / "sys_script" / "My BR__111"
     assert snapshot.read_meta_extra(o.path) == {"instance": "dev", "kind": "edit",

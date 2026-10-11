@@ -53,6 +53,12 @@ def test_iter_copies_reads_meta_and_skips_underscore_dirs(tmp_path):
     assert Store(tmp_path).iter_copies("prod", EDIT) == []
 
 
+def test_iter_copies_reads_name_from_meta_not_folder(tmp_path):
+    make_copy(tmp_path, "dev", "sys_script", "a/b:c", "111")
+    [c] = Store(tmp_path).iter_copies("dev", EDIT)
+    assert c.name == "a/b:c" and c.path.name == "a_b_c__111"
+
+
 def test_check_store_root_accepts_store_and_fresh_dir(tmp_path):
     make_copy(tmp_path, "dev", "sys_script", "A", "111")
     assert check_store_root(tmp_path, ["dev", "prod"]) is None

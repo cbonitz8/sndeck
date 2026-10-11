@@ -3,14 +3,16 @@ from update-set state.
 
 This is the missing other half of apply_push's "instance changed since pull … —
 refresh first" error: that error tells the user to refresh, but until now there was
-no way to do it. A scratch folder whose local field files match the instance while
-its frozen snapshot does not (e.g. the record was pushed via a *different* set, or the
-enclosing set was marked complete before the push) stays "phantom dirty" forever —
-gc keeps treating it as dirty and can never retire it.
+no way to do it. An edit copy whose local field files match the instance while its
+frozen snapshot does not (e.g. the record was pushed via a *different* set) is "phantom
+dirty": while its target set is in progress it keeps showing as an unpushed edit. Once
+the set ships gc deletes it as already-live (C2), and a re-pull clears it, because pull
+blocks only fields that are dirty AND differ from the instance; refresh clears it
+without waiting.
 
 Design (see module tests): snapshot-only by default. Rewriting only the snapshot
 resolves the already-pushed case to clean (local == instance == new snapshot → not
-dirty → prunable) and leaves the drift guard intact for the genuinely-divergent case.
+dirty → gc-eligible once the set ships) and leaves the drift guard intact for the genuinely-divergent case.
 If the local field files DIFFER from the instance, a snapshot-only rewrite would both
 leave the record dirty AND silently retire apply_push's drift protection (a later push
 would clobber the instance), so we refuse unless --overwrite-local is passed, which
