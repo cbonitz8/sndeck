@@ -189,28 +189,43 @@ def _prune_empty_dirs(top: Path) -> None:
 
 def apply_migration(steps: list[MigrationStep], store: Store, today: date) -> MigrationReport:
     report = MigrationReport()
-    for s in steps:
-        if s.action == "store" and store.locate(s.instance, s.copy.table, s.copy.sys_id, EDIT):
-            raise RuntimeError(f"store already holds {s.instance}/{s.copy.table}/{s.copy.sys_id}; "
-                               "nothing was migrated")
+    dests: list[tuple[MigrationStep, Path]] = []
     for s in steps:
         c = s.copy
         if s.action == "store":
-            dest = store.new_path(s.instance, EDIT, c.table, c.name, c.sys_id)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(c.path, dest)
-            write_meta_extra(dest, instance=s.instance, kind=EDIT, target_set=s.target_set)
-            report.stored += 1
+            dests.append((s, store.new_path(s.instance, EDIT, c.table, c.name, c.sys_id)))
         elif s.action == "attic":
-            source_root = c.path.relative_to(store.root).parts[0]
-            dest = store.attic_path(s.instance, today, c.table, c.name, c.sys_id) / source_root
+            sub = c.path.parent.parent.relative_to(store.root)
+            dests.append((s, store.attic_path(s.instance, today, c.table, c.name, c.sys_id) / sub))
+    seen: set[Path] = set()
+    clashes = []
+    for s, dest in dests:
+        if dest in seen or dest.exists() or (
+                s.action == "store" and store.locate(s.instance, s.copy.table, s.copy.sys_id, EDIT)):
+            clashes.append(str(dest))
+        seen.add(dest)
+    if clashes:
+        raise RuntimeError("destinations already exist or are shared; nothing was migrated: "
+                           + ", ".join(clashes))
+    created: list[Path] = []
+    try:
+        for s, dest in dests:
+            c = s.copy
             dest.parent.mkdir(parents=True, exist_ok=True)
+            created.append(dest)
             shutil.copytree(c.path, dest)
-            (dest / "local.diff").write_text(s.diff, encoding="utf-8")
-            (dest / "reason.txt").write_text(s.reason + "\n", encoding="utf-8")
-            report.atticked += 1
-        else:
-            report.dropped += 1
+            if s.action == "store":
+                write_meta_extra(dest, instance=s.instance, kind=EDIT, target_set=s.target_set)
+                report.stored += 1
+            else:
+                (dest / "local.diff").write_text(s.diff, encoding="utf-8")
+                (dest / "reason.txt").write_text(s.reason + "\n", encoding="utf-8")
+                report.atticked += 1
+    except BaseException:
+        for dest in created:
+            shutil.rmtree(dest, ignore_errors=True)
+        raise
+    report.dropped = sum(1 for s in steps if s.action == "drop")
     tops = sorted({store.root / s.copy.path.relative_to(store.root).parts[0] for s in steps})
     for s in steps:
         shutil.rmtree(s.copy.path)

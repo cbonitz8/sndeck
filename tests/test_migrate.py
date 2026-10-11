@@ -1,9 +1,11 @@
 from datetime import date
 
+import pytest
+
 from sndeck import snapshot
 from sndeck.migrate import apply_migration, find_legacy, plan_migration
 from sndeck.store import EDIT, Store
-from storekit import make_legacy, sid
+from storekit import make_copy, make_legacy, sid
 
 S_IP, S_IP2, S_DONE = sid("a"), sid("b"), sid("c")
 
@@ -49,7 +51,8 @@ def test_find_legacy_reads_nearest_set_and_skips_store(tmp_path):
     a = _legacy(tmp_path, "t1", S_IP)
     nested = make_legacy(_root(tmp_path) / "t2" / f"o__{S_DONE}" / f"i__{S_IP}",
                          "sys_script", "B", "222")
-    (_root(tmp_path) / "dev" / "sys_script").mkdir(parents=True)
+    make_copy(_root(tmp_path), "dev", "sys_script", "S", sid("3"))
+    make_legacy(_root(tmp_path) / "_attic" / "2026-10-01", "sys_script", "Z", sid("4"))
     found = {c.path: c.set_sys_id for c in find_legacy(_root(tmp_path), ["dev", "prod"])}
     assert found == {a: S_IP, nested: S_IP}
 
@@ -131,7 +134,7 @@ def test_apply_writes_store_attic_and_removes_legacy(tmp_path):
     stored = s.locate("dev", "sys_script", "111", EDIT)
     assert snapshot.read_meta_extra(stored)["target_set"] == {"sys_id": S_IP, "name": "Live"}
     assert snapshot.is_dirty(stored)
-    attic = root / "dev" / "_attic" / "2026-10-20" / "sys_script" / "B__222" / "t2"
+    attic = root / "dev" / "_attic" / "2026-10-20" / "sys_script" / "B__222" / "t2" / f"set__{S_DONE}"
     assert (attic / "local.diff").exists() and (attic / "reason.txt").exists()
     assert not keep.exists() and not gone.exists()
     assert report.leftovers == {"t1": ["set-map.json"]}
@@ -146,4 +149,54 @@ def test_corrupt_snapshot_is_dirty_and_never_dropped(tmp_path):
     lk = FakeLookups(sets={S_DONE: ["dev"]}, states=_states(),
                      live={("dev", "sys_script", "111"): {"script": "other"}})
     steps = plan_migration(found, lk)
-    assert [s.action for s in steps] != ["drop"]
+    assert [s.action for s in steps] == ["attic"]
+
+
+def _two_conflicting(tmp_path):
+    a = _legacy(tmp_path, "t1", S_IP, dirty=True)
+    b = _legacy(tmp_path, "t1", S_IP2, dirty=True, script="other")
+    lk = FakeLookups(sets={S_IP: ["dev"], S_IP2: ["dev"]}, states=_states(),
+                     live={("dev", "sys_script", "111"): {"script": "live"}})
+    return a, b, plan_migration(find_legacy(_root(tmp_path), ["dev"]), lk)
+
+
+def test_conflicting_copies_in_one_task_root_get_separate_attic_folders(tmp_path):
+    _a, _b, steps = _two_conflicting(tmp_path)
+    apply_migration(steps, Store(_root(tmp_path)), date(2026, 10, 20))
+    base = _root(tmp_path) / "dev" / "_attic" / "2026-10-20" / "sys_script" / "A__111" / "t1"
+    for set_id in (S_IP, S_IP2):
+        d = base / f"set__{set_id}"
+        assert (d / "local.diff").exists() and (d / "reason.txt").exists()
+
+
+def test_failed_apply_rolls_back_and_keeps_legacy(tmp_path, monkeypatch):
+    import sndeck.migrate as migrate
+    a, b, steps = _two_conflicting(tmp_path)
+    real = migrate.shutil.copytree
+    calls = []
+
+    def flaky(src, dst, *args, **kw):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real(src, dst, *args, **kw)
+
+    monkeypatch.setattr(migrate.shutil, "copytree", flaky)
+    with pytest.raises(OSError):
+        apply_migration(steps, Store(_root(tmp_path)), date(2026, 10, 20))
+    assert a.exists() and b.exists()
+    base = _root(tmp_path) / "dev" / "_attic" / "2026-10-20" / "sys_script" / "A__111" / "t1"
+    assert not any(base.glob("set__*"))
+    monkeypatch.setattr(migrate.shutil, "copytree", real)
+    apply_migration(steps, Store(_root(tmp_path)), date(2026, 10, 20))
+
+
+def test_existing_destination_refuses_before_writing(tmp_path):
+    a, b, steps = _two_conflicting(tmp_path)
+    s = Store(_root(tmp_path))
+    pre = s.attic_path("dev", date(2026, 10, 20), "sys_script", "A", "111") / "t1" / f"set__{S_IP}"
+    pre.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="nothing was migrated"):
+        apply_migration(steps, s, date(2026, 10, 20))
+    assert a.exists() and b.exists()
+    assert not (pre.parent / f"set__{S_IP2}").exists()
