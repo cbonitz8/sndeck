@@ -9,13 +9,12 @@ acts on the classes allowed for the call:
   C6 attic day folder old    delete                 gc --apply --attic-older-than N"""
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .snapshot import field_changes, instance_fields, local_diff
+from .snapshot import instance_fields, is_dirty_or_unreadable, local_diff
 from .store import ATTIC_DIR, EDIT, REF, Store, count_legacy
 
 REF_TTL = timedelta(days=14)
@@ -35,15 +34,6 @@ class GcAction:
     diff: str = ""
 
 
-def _is_dirty(path: Path) -> bool:
-    """Like snapshot.is_dirty, but an unreadable snapshot counts as dirty: the edit
-    cannot be proven absent, so it must reach the live compare instead of C1."""
-    try:
-        return bool(field_changes(path))
-    except json.JSONDecodeError:
-        return True
-
-
 def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
     out: list[GcAction] = []
     for c in store.iter_copies(instance, EDIT):
@@ -58,7 +48,7 @@ def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
             continue
         if state not in SHIPPED:
             continue
-        if not _is_dirty(c.path):
+        if not is_dirty_or_unreadable(c.path):
             out.append(GcAction("C1", c.path, label))
             continue
         live = fetch(c.table, c.sys_id)

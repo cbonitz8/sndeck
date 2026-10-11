@@ -162,3 +162,13 @@ def is_dirty(record_path) -> bool:
         return bool(field_changes(record_path))
     except (FileNotFoundError, json.JSONDecodeError):
         return False
+
+
+def is_dirty_or_unreadable(record_path) -> bool:
+    """Like is_dirty, but a corrupt snapshot counts as dirty. is_dirty answers "is
+    there an edit worth pushing"; this answers "is it safe to delete this copy", and
+    an edit that cannot be proven absent must be treated as present."""
+    try:
+        return bool(field_changes(record_path))
+    except json.JSONDecodeError:
+        return True
