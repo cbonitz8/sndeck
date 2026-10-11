@@ -117,3 +117,11 @@ def test_resolver_returns_first_candidate_when_none_exist(tmp_path, monkeypatch)
     b = tmp_path / "missing-b.json"
     monkeypatch.setattr(cfg, "DEFAULT_CONFIG_CANDIDATES", (str(a), str(b)))
     assert _resolve_config_path() == str(a)
+
+
+def test_instance_names_in_file_order(tmp_path):
+    import json
+    from sndeck.config import instance_names
+    p = tmp_path / "instances.json"
+    p.write_text(json.dumps({"instances": [{"name": "dev"}, {"name": "prod"}]}))
+    assert instance_names(config_path=str(p)) == ["dev", "prod"]

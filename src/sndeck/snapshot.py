@@ -3,7 +3,7 @@
 A pulled record folder holds three things, and this module is the single owner of
 all three shapes plus the one definition of "dirty":
 
-  - record.json     ``{"_meta": {table, sys_id, name, pulled_at}, **fields}``
+  - record.json     ``{"_meta": {table, sys_id, name, instance, kind, target_set, pulled_at}, **fields}``
                     identity + the full non-underscore column dump.
   - .snapshot.json  ``{**fields}`` — the frozen baseline a local edit is diffed against.
   - <field><ext>    one file per code field — the editable surface.
@@ -15,6 +15,7 @@ duplicated across records / sync / refresh — and refresh computed "dirty" a se
 divergent way. Everything snapshot-shaped now routes through here."""
 from __future__ import annotations
 
+import difflib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,16 +64,67 @@ def write_snapshot(record_path, fields: dict) -> None:
         json.dumps(fields, indent=2), encoding="utf-8")
 
 
-def record_body(table: str, sys_id: str, name: str, fields: dict) -> dict:
-    """The record.json document: `_meta` identity + a fresh pulled_at, then fields."""
-    return {"_meta": {"table": table, "sys_id": sys_id, "name": name,
-                      "pulled_at": datetime.now(timezone.utc).isoformat()}, **fields}
+META_EXTRA_KEYS = ("instance", "kind", "target_set")
 
 
-def write_record_json(record_path, table: str, sys_id: str, name: str, fields: dict) -> None:
+def record_body(table: str, sys_id: str, name: str, fields: dict,
+                extra: dict | None = None) -> dict:
+    """The record.json document: `_meta` identity, the store keys in `extra`, a fresh
+    pulled_at, then fields."""
+    meta = {"table": table, "sys_id": sys_id, "name": name}
+    if extra is not None:
+        meta.update(extra)
+    meta["pulled_at"] = datetime.now(timezone.utc).isoformat()
+    return {"_meta": meta, **fields}
+
+
+def write_record_json(record_path, table: str, sys_id: str, name: str, fields: dict,
+                      extra: dict | None = None) -> None:
     """Write record.json from `fields`, stamping a fresh pulled_at."""
     (Path(record_path) / RECORD_JSON).write_text(
-        json.dumps(record_body(table, sys_id, name, fields), indent=2), encoding="utf-8")
+        json.dumps(record_body(table, sys_id, name, fields, extra), indent=2),
+        encoding="utf-8")
+
+
+def read_meta_extra(record_path) -> dict:
+    """The store keys (instance, kind, target_set) present in a folder's _meta."""
+    meta = json.loads((Path(record_path) / RECORD_JSON).read_text())["_meta"]
+    return {k: meta[k] for k in META_EXTRA_KEYS if k in meta}
+
+
+def write_meta_extra(record_path, **updates) -> None:
+    """Update store keys in _meta in place; fields and pulled_at are untouched."""
+    p = Path(record_path) / RECORD_JSON
+    doc = json.loads(p.read_text())
+    for k, v in updates.items():
+        if k not in META_EXTRA_KEYS:
+            raise KeyError(f"{k!r} is not a store meta key")
+        doc["_meta"][k] = v
+    p.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
+def _body(fields: dict, field: str) -> str:
+    v = fields.get(field)
+    return "" if v is None else str(v)
+
+
+def local_diff(record_path, live_fields: dict) -> str:
+    """Unified diff of each code field, instance -> local. Empty when they match."""
+    record_path = Path(record_path)
+    table, _, _ = read_meta(record_path)
+    art = CODE_ARTIFACTS.get(table)
+    if not art:
+        return ""
+    chunks: list[str] = []
+    for f in art.script_fields:
+        fp = record_path / field_file(f)
+        local = _norm(fp.read_text(encoding="utf-8")) if fp.exists() else ""
+        live = _norm(_body(live_fields, f))
+        if local != live:
+            chunks.extend(difflib.unified_diff(
+                live.splitlines(keepends=True), local.splitlines(keepends=True),
+                fromfile=f"instance/{field_file(f)}", tofile=f"local/{field_file(f)}"))
+    return "".join(chunks)
 
 
 @dataclass(frozen=True)

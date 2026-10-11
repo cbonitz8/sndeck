@@ -217,3 +217,13 @@ def test_cmd_refresh_all_is_best_effort_zero(tmp_path, capsys):
     by_name = {o["name"]: o for o in out}
     assert by_name["Clean"]["refreshed"] is True
     assert by_name["Diverged"]["refused"] is True
+
+
+def test_overwrite_local_keeps_meta_extras(tmp_path):
+    from sndeck import snapshot
+    from sndeck.refresh import apply_refresh
+    from storekit import SET_A, make_copy
+    f = make_copy(tmp_path, "dev", "sys_script", "A", "111", dirty=True)
+    apply_refresh(f, {"sys_id": "111", "name": "A", "script": "live"}, overwrite_local=True)
+    assert snapshot.read_meta_extra(f) == {"instance": "dev", "kind": "edit",
+                                           "target_set": SET_A}

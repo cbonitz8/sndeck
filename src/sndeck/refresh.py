@@ -173,7 +173,8 @@ def apply_refresh(record_path, instance_record: dict, *,
                 fp.write_text(newv, encoding="utf-8")
         # --overwrite-local is a full local re-materialization; snapshot-only refresh
         # never touches record.json.
-        snapshot.write_record_json(record_path, plan.table, plan.sys_id, plan.name, inst_fields)
+        snapshot.write_record_json(record_path, plan.table, plan.sys_id, plan.name,
+                                   inst_fields, snapshot.read_meta_extra(record_path))
 
     return RefreshOutcome(plan.table, plan.sys_id, plan.name, str(record_path),
                           True, False, False, None,

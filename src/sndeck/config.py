@@ -37,6 +37,13 @@ def _resolve_config_path(config_path: str | None = None) -> str:
     return os.path.expanduser(DEFAULT_CONFIG_CANDIDATES[0])
 
 
+def instance_names(*, config_path: str | None = None) -> list[str]:
+    """Configured instance names, in file order."""
+    with open(_resolve_config_path(config_path), encoding="utf-8") as fh:
+        data = json.load(fh)
+    return [inst["name"] for inst in data["instances"]]
+
+
 @dataclass(frozen=True)
 class Instance:
     name: str
