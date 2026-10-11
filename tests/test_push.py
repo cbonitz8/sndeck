@@ -360,3 +360,19 @@ def test_push_refuses_copy_from_another_instance(tmp_path, sn_client):
     [o] = push_all(sn_client(_routes(), write), [f])
     assert not o.pushed and o.reason == "copy belongs to instance 'prod', not 'dev'"
     assert writes == []
+
+
+def test_push_keeps_local_edit_the_instance_did_not_take(tmp_path, sn_client):
+    """SN answers 200 but a field ACL or before-BR keeps the old value: the local edit
+    must survive and the outcome must say which field did not land."""
+    f = make_copy(tmp_path, "dev", "sys_script", "A", "111", dirty=True)
+
+    def write(method, table, sys_id, body):
+        return {}
+    [o] = push_all(sn_client(_routes(), write), [f])
+
+    assert o.pushed
+    assert (f / "script.js").read_text() == "gs.info('x'); // EDITED"
+    assert is_dirty(f)
+    assert o.warning is not None and "script" in o.warning
+    assert "did not take" in o.warning

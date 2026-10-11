@@ -18,6 +18,7 @@ from .gc import reconcile_and_report
 from .records import default_kind, dirty_files_from_disk, pull, pull_set_into_store
 from .registry import CODE_ARTIFACTS
 from .state import load_state
+from .snapshot import DamagedRecordError
 from .store import EDIT, Store, StoreInvariantError
 from .sync import is_dirty
 from .theme import LATTE, MACCHIATO, THEMES, next_theme
@@ -820,7 +821,7 @@ class SndeckApp(App):
             tracked = load_state().tracked_sets
             model = build_tree(self._client, self._store, tracked)
             self.call_from_thread(self._render_tree, model)
-        except (AuthExpiredError, StoreInvariantError) as e:
+        except (AuthExpiredError, StoreInvariantError, DamagedRecordError) as e:
             self._pull_failed(str(e), "error")
 
     def action_pull_set(self) -> None:
@@ -863,7 +864,7 @@ class SndeckApp(App):
         except RuntimeError as e:
             self._pull_failed(str(e), "warning")
             return
-        except (AuthExpiredError, StoreInvariantError) as e:
+        except (AuthExpiredError, StoreInvariantError, DamagedRecordError) as e:
             self._pull_failed(str(e), "error")
             return
         self.call_from_thread(self.notify, f"Pulled {o.kind} copy of {table}/{o.name} → {o.path}",
@@ -1117,5 +1118,5 @@ class SndeckApp(App):
                                       severity="warning")
             model = build_tree(self._client, self._store, load_state().tracked_sets)
             self.call_from_thread(self._render_tree, model)
-        except (AuthExpiredError, StoreInvariantError) as e:
+        except (AuthExpiredError, StoreInvariantError, DamagedRecordError) as e:
             self._pull_failed(str(e), "error")

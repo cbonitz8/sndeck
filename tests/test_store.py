@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from sndeck.snapshot import DamagedRecordError
 from sndeck.store import (EDIT, REF, Store, StoreInvariantError, check_store_root,
                           count_legacy)
 from storekit import SET_A, make_copy, make_legacy, sid
@@ -90,14 +91,14 @@ def test_check_store_root_refuses_records_near_root(tmp_path):
 def test_count_legacy_ignores_store_copies(tmp_path):
     make_copy(tmp_path, "dev", "sys_script", "A", "111")
     make_legacy(tmp_path / "old" / f"s__{sid('c')}", "sys_script", "B", "222")
-    assert count_legacy(tmp_path) == 1
+    assert count_legacy(tmp_path, ["dev"]) == 1
 
 
 def test_iter_copies_raises_on_record_without_meta(tmp_path):
     bad = tmp_path / "dev" / "sys_script" / "X__999"
     bad.mkdir(parents=True)
     (bad / "record.json").write_text("{}")
-    with pytest.raises(KeyError):
+    with pytest.raises(DamagedRecordError, match="missing _meta"):
         Store(tmp_path).iter_copies("dev")
 
 
@@ -105,8 +106,8 @@ def test_count_legacy_raises_on_record_without_meta(tmp_path):
     bad = tmp_path / "old" / "sys_script" / "X__999"
     bad.mkdir(parents=True)
     (bad / "record.json").write_text("{}")
-    with pytest.raises(KeyError):
-        count_legacy(tmp_path)
+    with pytest.raises(DamagedRecordError, match="missing _meta"):
+        count_legacy(tmp_path, ["dev"])
 
 
 def test_check_store_root_on_default_root_names_manual_remedy(tmp_path):

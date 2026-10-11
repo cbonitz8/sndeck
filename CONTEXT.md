@@ -33,7 +33,11 @@ lives. There is **one copy per (instance, table, sys_id, kind)**, under one stor
 - **Target set** — the update set an edit copy pushes into, recorded in its `_meta`
   (`records.retarget` rewrites it). Ref copies have none.
 - **`check_store_root`** — says why a path cannot be a store root (an update-set folder, an
-  instance folder, a legacy per-task root, a folder of bare record folders), or `None`.
+  instance folder, a legacy per-task root, any folder inside the default `~/.sn-scratch`, a
+  folder of bare record folders), or `None`.
+- **`legacy_meta`** — the one rule for a legacy copy (outside instance folders and the root
+  `_attic`, `_meta` with `table` and `sys_id` but no `instance`), shared by
+  `migrate.find_legacy` and `count_legacy`.
   sndeck refuses to start on a bad root rather than scatter copies into it.
 
 ## The snapshot (module: `snapshot.py`)
@@ -47,6 +51,11 @@ record folder holds:
 - `.snapshot.json` — `{**fields}`; the **frozen baseline** a local edit is diffed against.
 - `<field><ext>` — one file per code field; the editable surface.
 - `local.diff` — only inside an attic folder: the unpushed edit gc preserved.
+
+`snapshot.expected_files` names exactly the first three; anything else in a record folder
+(`snapshot.unexpected_files`) is the user's, so gc and migrate never delete such a folder as
+clean. A `record.json` missing a required key raises `DamagedRecordError` ("damaged
+record.json at <path>: missing <key>"), which is not a `LookupError`.
 
 **Dirty** — a record is dirty when a code field's local file differs from its snapshot
 baseline (newline-normalized). `snapshot.is_dirty` answers "is there an edit worth pushing" for the staging pane, push and
@@ -65,7 +74,9 @@ and counts a copy whose `.snapshot.json` cannot be read as dirty. `store.py` own
   `push.py`). Everything is refused before any write for: ref copies, legacy copies with no
   `kind`, a missing or malformed `target_set`, a target set that is not in progress or has
   no application scope, and a copy whose `_meta.instance` is not the client's. After a push
-  the copy is re-baselined from the live record.
+  the copy is re-baselined from the live record when every pushed field reads back as sent;
+  otherwise its local files are kept, it stays dirty, and the outcome warns naming the fields
+  the instance did not take.
 - **refresh** — re-baseline a record's snapshot from the live instance, decoupled from set
   state; the way out of "phantom dirty" (`refresh.py`).
 - **retarget** — point an edit copy at another update set (default: the current one)
@@ -84,9 +95,16 @@ and counts a copy whose `.snapshot.json` cannot be read as dirty. `store.py` own
 
   The **auto subset** (C1, C2) runs best-effort on `status`, `us ls` and TUI start. `N` must be at least 1 and
   today's attic folder is never deleted. An unreadable `.snapshot.json` counts as dirty. A
-  second attic move for the same record on the same day lands in a `-2` sibling folder.
+  second attic move for the same record on the same day lands in a `-2` sibling folder. A
+  C1/C2 copy whose folder holds unexpected files is planned as C3, naming the files. C6 covers
+  `<root>/<instance>/_attic/` only; the root-level `_attic/` that migrate fills with copies
+  of unresolved instance is cleaned by hand.
 - **migrate** — one-time conversion of the legacy per-task, per-set layout into the store
   (`migrate.py`; dry run without `--apply`). It always reads dev for set and record state,
   whatever `--instance` says. It never creates an edit copy on a non-dev instance: there a
   clean legacy copy is dropped and a dirty one goes to the attic (under its legacy parent
-  path). Every destination is checked before anything moves, and a failed apply rolls back.
+  path). Every destination is checked before anything moves (`migrate.destination_clashes`,
+  which the dry run also runs). Rollback covers the copy phase: no legacy folder is deleted
+  until every copy succeeded. A copy that would be dropped but holds unexpected files goes to
+  the attic. Only the set and table folders the migrated copies leave empty are removed; the
+  top-level task folders and everything else in them stay.

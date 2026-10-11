@@ -138,7 +138,7 @@ def test_apply_writes_store_attic_and_removes_legacy(tmp_path):
     assert (attic / "local.diff").exists() and (attic / "reason.txt").exists()
     assert not keep.exists() and not gone.exists()
     assert report.leftovers == {"t1": ["set-map.json"]}
-    assert not (root / "t2").exists()
+    assert (root / "t2").is_dir() and not any((root / "t2").iterdir())
 
 
 def test_corrupt_snapshot_is_dirty_and_never_dropped(tmp_path):
@@ -218,3 +218,81 @@ def test_group_resolved_to_prod_never_becomes_an_edit_copy(tmp_path):
     assert by_action["attic"].copy.dirty and by_action["attic"].instance == "prod"
     assert "unpushed edit against prod" in by_action["attic"].reason
     assert "+gs.info" in by_action["attic"].diff and "-live" in by_action["attic"].diff
+
+
+def _apply(tmp_path, lk, day=date(2026, 10, 20)):
+    root = _root(tmp_path)
+    return apply_migration(plan_migration(find_legacy(root, ["dev"]), lk), Store(root), day)
+
+
+def test_check_store_root_refuses_task_folder_emptied_by_migrate():
+    import os
+    from pathlib import Path
+    from sndeck.settings import DEFAULT_STORE_ROOT
+    from sndeck.store import check_store_root
+    root = Path(os.path.expanduser(DEFAULT_STORE_ROOT))
+    task = root / "vendor-hotfix"
+    make_legacy(task / f"rel__{S_DONE}", "sys_script", "A", "111")
+    (task / "notes.md").write_text("notes")
+    assert "legacy per-task root" in check_store_root(task, ["dev"])
+    lk = FakeLookups(sets={S_DONE: ["dev"]}, states=_states())
+    apply_migration(plan_migration(find_legacy(root, ["dev"]), lk), Store(root),
+                    date(2026, 10, 20))
+    assert sorted(p.name for p in task.iterdir()) == ["notes.md"]
+    msg = check_store_root(task, ["dev"])
+    assert msg is not None and "inside the default store root" in msg and str(root) in msg
+    assert "inside the default store root" in check_store_root(root / "not-made-yet", ["dev"])
+    assert check_store_root(root, ["dev"]) is None
+    work = Path.home() / "work"
+    (work / "dev").mkdir(parents=True)
+    assert check_store_root(work, ["prod"]) is None
+
+
+def test_count_legacy_after_attic_apply_is_zero_and_reconcile_is_quiet(tmp_path, sn_client):
+    from sndeck.gc import reconcile_and_report
+    from sndeck.store import count_legacy
+    root = _root(tmp_path)
+    _legacy(tmp_path, "t1", S_DONE, dirty=True)
+    _legacy(tmp_path, "t2", sid("e"), name="U", sys_id="999")
+    lk = FakeLookups(sets={S_DONE: ["dev"]}, states=_states(),
+                     live={("dev", "sys_script", "111"): {"script": "other"}})
+    report = _apply(tmp_path, lk)
+    assert report.atticked == 2
+    assert list((root / "_attic").rglob("record.json"))
+    assert list((root / "dev" / "_attic").rglob("record.json"))
+    assert count_legacy(root, ["dev"]) == 0
+    lines = reconcile_and_report(sn_client(lambda table, params: []), Store(root))
+    assert not any("legacy" in line for line in lines)
+
+
+def test_apply_keeps_empty_user_folders_and_the_task_root(tmp_path):
+    root = _root(tmp_path)
+    _legacy(tmp_path, "t1", S_DONE)
+    (root / "t1" / "backups").mkdir()
+    (root / "t1" / f"set__{S_DONE}" / "drafts").mkdir()
+    _apply(tmp_path, FakeLookups(sets={S_DONE: ["dev"]}, states=_states()))
+    assert (root / "t1" / "backups").is_dir()
+    assert (root / "t1" / f"set__{S_DONE}" / "drafts").is_dir()
+    assert not (root / "t1" / f"set__{S_DONE}" / "sys_script").exists()
+
+
+def test_apply_with_a_legacy_folder_nested_in_another(tmp_path):
+    outer = _legacy(tmp_path, "t1", S_DONE)
+    inner = make_legacy(outer, "sys_script", "B", "222")
+    lk = FakeLookups(sets={S_DONE: ["dev"]}, states=_states(),
+                     records={("sys_script", "222"): ["dev"]})
+    report = _apply(tmp_path, lk)
+    assert report.atticked == 1 and report.dropped == 1
+    assert not outer.exists() and not inner.exists()
+
+
+def test_clean_copy_with_user_files_goes_to_attic_not_dropped(tmp_path):
+    c = _legacy(tmp_path, "t1", S_DONE)
+    (c / "script.js.bak").write_text("old")
+    lk = FakeLookups(sets={S_DONE: ["dev"]}, states=_states())
+    steps = plan_migration(find_legacy(_root(tmp_path), ["dev"]), lk)
+    assert [s.action for s in steps] == ["attic"]
+    assert "script.js.bak" in steps[0].reason
+    _apply(tmp_path, lk)
+    kept = list((_root(tmp_path) / "dev" / "_attic").rglob("script.js.bak"))
+    assert [p.read_text() for p in kept] == ["old"]

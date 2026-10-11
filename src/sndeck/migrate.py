@@ -1,12 +1,14 @@
 """One-time conversion of the legacy per-task, per-set layout into the store.
 
 find_legacy reads the disk, plan_migration decides (pure, given lookups), and
-apply_migration writes: copies first, then deletes the legacy folders, then removes
-directories left empty. Files that are not record folders are never touched."""
+apply_migration writes: copies first, then deletes the legacy folders, then removes the
+set and table folders those copies leave empty. Files that are not record folders, and
+the top-level legacy folders themselves, are never touched. A copy that would be dropped
+but holds files a record folder does not (snapshot.expected_files) goes to the attic.
+Rollback covers the copy phase only: no legacy folder is deleted until every copy has
+been written."""
 from __future__ import annotations
 
-import json
-import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -14,9 +16,10 @@ from datetime import date
 from pathlib import Path
 
 from .registry import CODE_ARTIFACTS
-from .snapshot import RECORD_JSON, _norm, field_file, is_dirty_or_unreadable, local_diff, write_meta_extra
+from .snapshot import (RECORD_JSON, _norm, field_file, is_dirty_or_unreadable, local_diff,
+                       unexpected_files, write_meta_extra)
 from .records import default_kind
-from .store import ATTIC_DIR, EDIT, Store
+from .store import EDIT, Store, legacy_meta
 
 _SET_DIR = re.compile(r"__(?P<sysid>[0-9a-f]{32})$")
 IN_PROGRESS = "in progress"
@@ -31,6 +34,7 @@ class LegacyCopy:
     set_sys_id: str | None
     dirty: bool
     pulled_at: str
+    extra_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -51,15 +55,21 @@ class MigrationReport:
     leftovers: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RootSummary:
+    name: str
+    store: int
+    attic: int
+    drop: int
+    left: list[str]
+
+
 def find_legacy(root, instance_names) -> list[LegacyCopy]:
     root = Path(root)
-    skip = [root / n for n in instance_names] + [root / ATTIC_DIR]
     out: list[LegacyCopy] = []
     for rj in sorted(root.rglob(RECORD_JSON)):
-        if any(s in rj.parents for s in skip):
-            continue
-        meta = json.loads(rj.read_text())["_meta"]
-        if "instance" in meta or "table" not in meta or "sys_id" not in meta:
+        meta = legacy_meta(rj, root, instance_names)
+        if meta is None:
             continue
         folder = rj.parent
         set_id = None
@@ -72,7 +82,8 @@ def find_legacy(root, instance_names) -> list[LegacyCopy]:
                 break
         out.append(LegacyCopy(folder, meta["table"], meta["sys_id"],
                               meta.get("name", folder.name.rsplit("__", 1)[0]),
-                              set_id, is_dirty_or_unreadable(folder), meta.get("pulled_at", "")))
+                              set_id, is_dirty_or_unreadable(folder), meta.get("pulled_at", ""),
+                              tuple(unexpected_files(folder))))
     return out
 
 
@@ -199,36 +210,95 @@ def plan_migration(copies: list[LegacyCopy], lookups) -> list[MigrationStep]:
         groups.setdefault((instance, c.table, c.sys_id), []).append(c)
     for (instance, _t, _s), group in sorted(groups.items()):
         steps.extend(_plan_group(instance, group, lookups))
-    return steps
+    return [_keep_user_files(s) for s in steps]
 
 
-def _prune_empty_dirs(top: Path) -> None:
-    for dirpath, _dirs, _files in os.walk(top, topdown=False):
-        p = Path(dirpath)
-        if not any(p.iterdir()):
-            p.rmdir()
+def _keep_user_files(s: MigrationStep) -> MigrationStep:
+    """A drop would delete the copy's folder; one holding user files goes to the attic."""
+    if s.action != "drop" or not s.copy.extra_files:
+        return s
+    return MigrationStep("attic", s.copy, s.instance, None,
+                         f"{s.reason}, but it holds files sndeck did not write: "
+                         + ", ".join(s.copy.extra_files))
+
+
+def destination(s: MigrationStep, store: Store, today: date) -> Path | None:
+    """Where a store or attic step writes its copy; None for a drop, which writes nothing."""
+    c = s.copy
+    if s.action == "store":
+        return store.new_path(s.instance, EDIT, c.table, c.name, c.sys_id)
+    if s.action == "attic":
+        sub = c.path.parent.parent.relative_to(store.root)
+        return store.attic_path(s.instance, today, c.table, c.name, c.sys_id) / sub
+    return None
+
+
+def destinations(steps: list[MigrationStep], store: Store,
+                 today: date) -> list[tuple[MigrationStep, Path]]:
+    """(step, destination) for every step that writes."""
+    pairs = [(s, destination(s, store, today)) for s in steps]
+    return [(s, d) for s, d in pairs if d is not None]
+
+
+def destination_clashes(dests: list[tuple[MigrationStep, Path]], store: Store) -> list[Path]:
+    """Destinations that already exist, are shared by two steps, or would give a record a
+    second edit copy. Reads the disk only; apply refuses when this is non-empty."""
+    seen: set[Path] = set()
+    clashes: list[Path] = []
+    for s, dest in dests:
+        if dest in seen or dest.exists() or (
+                s.action == "store" and store.locate(s.instance, s.copy.table, s.copy.sys_id, EDIT)):
+            clashes.append(dest)
+        seen.add(dest)
+    return clashes
+
+
+def _top(store_root: Path, c: LegacyCopy) -> Path:
+    return store_root / c.path.relative_to(store_root).parts[0]
+
+
+def _files_outside(top: Path, folders: list[Path]) -> list[str]:
+    return sorted(str(p.relative_to(top)) for p in top.rglob("*")
+                  if p.is_file() and not any(f == p or f in p.parents for f in folders))
+
+
+def summarize_roots(steps: list[MigrationStep], store_root) -> list[RootSummary]:
+    """Per top-level legacy folder: how many copies each action takes, and the files that
+    are not part of any record folder (migrate leaves them in place)."""
+    store_root = Path(store_root)
+    by_top: dict[Path, list[MigrationStep]] = {}
+    for s in steps:
+        by_top.setdefault(_top(store_root, s.copy), []).append(s)
+    out: list[RootSummary] = []
+    for top, group in sorted(by_top.items()):
+        counts = {a: sum(1 for s in group if s.action == a) for a in ("store", "attic", "drop")}
+        out.append(RootSummary(top.name, counts["store"], counts["attic"], counts["drop"],
+                               _files_outside(top, [s.copy.path for s in group])))
+    return out
+
+
+def _prune_emptied_dirs(folders: list[Path], tops: set[Path]) -> None:
+    """Remove the parents of the deleted record folders, below their top-level legacy
+    folder, that are now empty. Deepest first, so a set folder empties after its table
+    folders."""
+    parents: set[Path] = set()
+    for folder in folders:
+        for anc in folder.parents:
+            if anc in tops:
+                break
+            parents.add(anc)
+    for d in sorted(parents, key=lambda p: len(p.parts), reverse=True):
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
 
 
 def apply_migration(steps: list[MigrationStep], store: Store, today: date) -> MigrationReport:
     report = MigrationReport()
-    dests: list[tuple[MigrationStep, Path]] = []
-    for s in steps:
-        c = s.copy
-        if s.action == "store":
-            dests.append((s, store.new_path(s.instance, EDIT, c.table, c.name, c.sys_id)))
-        elif s.action == "attic":
-            sub = c.path.parent.parent.relative_to(store.root)
-            dests.append((s, store.attic_path(s.instance, today, c.table, c.name, c.sys_id) / sub))
-    seen: set[Path] = set()
-    clashes = []
-    for s, dest in dests:
-        if dest in seen or dest.exists() or (
-                s.action == "store" and store.locate(s.instance, s.copy.table, s.copy.sys_id, EDIT)):
-            clashes.append(str(dest))
-        seen.add(dest)
+    dests = destinations(steps, store, today)
+    clashes = destination_clashes(dests, store)
     if clashes:
         raise RuntimeError("destinations already exist or are shared; nothing was migrated: "
-                           + ", ".join(clashes))
+                           + ", ".join(str(c) for c in clashes))
     created: list[Path] = []
     try:
         for s, dest in dests:
@@ -248,14 +318,15 @@ def apply_migration(steps: list[MigrationStep], store: Store, today: date) -> Mi
             shutil.rmtree(dest, ignore_errors=True)
         raise
     report.dropped = sum(1 for s in steps if s.action == "drop")
-    tops = sorted({store.root / s.copy.path.relative_to(store.root).parts[0] for s in steps})
+    tops = {_top(store.root, s.copy) for s in steps}
     for s in steps:
-        shutil.rmtree(s.copy.path)
-    for top in tops:
-        _prune_empty_dirs(top)
-        if top.exists():
-            report.leftovers[top.name] = sorted(
-                str(p.relative_to(top)) for p in top.rglob("*") if p.is_file())
+        if s.copy.path.exists():
+            shutil.rmtree(s.copy.path)
+    _prune_emptied_dirs([s.copy.path for s in steps], tops)
+    for top in sorted(tops):
+        left = _files_outside(top, [])
+        if left:
+            report.leftovers[top.name] = left
     return report
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .auth import AuthExpiredError
 from .refresh import apply_refresh
-from .snapshot import read_meta_extra
+from .snapshot import _body, _norm, instance_fields, read_meta_extra
 from .store import EDIT, REF
 from .sync import build_push_plan, apply_push
 from .updatesets import (capture_for_record, current_user, read_pref, set_routing_meta,
@@ -44,14 +44,23 @@ def verify_capture(client, table: str, sys_id: str, intended: str | None) -> str
     return None
 
 
+def _not_taken(changes, live: dict) -> list[str]:
+    """Pushed fields whose live value is not what was PUT (newline-normalized): a field
+    ACL or a before-business-rule kept or rewrote it."""
+    fields = instance_fields(live)
+    return [c.field for c in changes if _norm(c.local) != _norm(_body(fields, c.field))]
+
+
 def push_all(client, record_paths: list) -> list["PushOutcome"]:
     """Push every staged record path. Per-record: build plan, route to the copy's
     `_meta.target_set` (refusing ref copies and targets that are not in progress), aim
     that scope's pointer at the target, align the active scope only when it changes,
     start a fresh server session if either pref moved (an open session keeps the prefs
     it read at open, so its PUT would capture by the old ones), apply, verify the capture
-    landed in the target set, then re-baseline the copy from the live record (every
-    local change was just PUT, so the live record replaces snapshot and files alike). A
+    landed in the target set, then re-baseline the copy from the live record: when every
+    pushed field reads back as PUT, the live record replaces snapshot and files alike;
+    when one does not (a field ACL or a before-BR), the local files are kept, the copy
+    stays dirty and the outcome warns, naming those fields. A
     failed record becomes a not-pushed outcome and the rest still push; a miscapture is
     a pushed outcome carrying capture_error. AuthExpiredError propagates (never
     swallowed)."""
@@ -110,14 +119,21 @@ def push_all(client, record_paths: list) -> list["PushOutcome"]:
             except Exception as e:
                 capture_error = f"could not verify capture: {e}"
             pushed = True
+            rebase = None
             try:
                 live = client.get_record(plan.table, plan.sys_id, display_value="false")
                 if live is not None:
-                    apply_refresh(path, live, overwrite_local=True)
+                    untaken = _not_taken(plan.changes, live)
+                    if untaken:
+                        rebase = (f"pushed, but the instance did not take {untaken}; "
+                                  f"local files kept, copy stays dirty")
+                    else:
+                        apply_refresh(path, live, overwrite_local=True)
             except AuthExpiredError:
                 raise
             except Exception as e:
                 rebase = f"pushed, but could not re-baseline the local copy: {e}"
+            if rebase is not None:
                 warning = rebase if warning is None else f"{warning}; {rebase}"
         except AuthExpiredError:
             raise

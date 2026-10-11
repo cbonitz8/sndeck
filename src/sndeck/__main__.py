@@ -6,7 +6,7 @@ import sys
 
 from .app import SndeckApp
 from .auth import TokenProvider
-from .config import instance_names, load_instance
+from .config import known_instance_names, load_instance
 from .rest import TableClient
 from .settings import load_sndeck_config, resolve_instance, resolve_store_root, resolve_theme
 from .store import check_store_root
@@ -60,11 +60,7 @@ def main() -> int:
     cfg = load_sndeck_config()
     root, source = resolve_store_root(sys.argv, os.environ, cfg)
     instance_name = resolve_instance(os.environ, cfg)
-    try:
-        names = instance_names()
-    except FileNotFoundError:
-        names = [instance_name]
-    problem = check_store_root(root, names)
+    problem = check_store_root(root, known_instance_names(instance_name))
     if problem:
         print(f"sndeck: {problem} (store root from {source})", file=sys.stderr)
         return 2

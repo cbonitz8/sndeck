@@ -4,6 +4,7 @@ acts on the classes allowed for the call:
   C1 shipped clean           delete                 auto
   C2 shipped, already live   delete                 auto
   C3 shipped, real edit      move to _attic + diff  gc --apply
+     (or a C1/C2 copy holding files sndeck did not write)
   C4 target set unknown      keep, warn             -
   C5 ref copy expired        delete                 gc --apply
   C6 attic day folder old    delete                 gc --apply --attic-older-than N"""
@@ -14,7 +15,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .snapshot import instance_fields, is_dirty_or_unreadable, local_diff
+from .config import known_instance_names
+from .snapshot import instance_fields, is_dirty_or_unreadable, local_diff, unexpected_files
 from .store import ATTIC_DIR, EDIT, REF, Store, count_legacy
 
 REF_TTL = timedelta(days=14)
@@ -34,6 +36,16 @@ class GcAction:
     diff: str = ""
 
 
+def _deletable(c, label: str, cls: str, diff: str) -> GcAction:
+    """A C1/C2 delete, unless the folder holds files sndeck did not write: then C3."""
+    extra = unexpected_files(c.path)
+    if extra:
+        return GcAction("C3", c.path, label,
+                        "holds files sndeck did not write: " + ", ".join(extra),
+                        c.table, c.name, c.sys_id, diff)
+    return GcAction(cls, c.path, label)
+
+
 def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
     out: list[GcAction] = []
     for c in store.iter_copies(instance, EDIT):
@@ -49,7 +61,7 @@ def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
         if state not in SHIPPED:
             continue
         if not is_dirty_or_unreadable(c.path):
-            out.append(GcAction("C1", c.path, label))
+            out.append(_deletable(c, label, "C1", ""))
             continue
         live = fetch(c.table, c.sys_id)
         if live is None:
@@ -62,7 +74,7 @@ def _edit_actions(store, instance, set_states, fetch) -> list[GcAction]:
             out.append(GcAction("C3", c.path, label, f"set {state}; local differs from instance",
                                 c.table, c.name, c.sys_id, diff))
         else:
-            out.append(GcAction("C2", c.path, label))
+            out.append(_deletable(c, label, "C2", ""))
     return out
 
 
@@ -141,8 +153,8 @@ def format_gc_report(actions: list[GcAction], applied: list[GcAction], instance:
     return lines
 
 
-def _legacy_line(store: Store) -> list[str]:
-    n = count_legacy(store.root)
+def _legacy_line(store: Store, instance: str) -> list[str]:
+    n = count_legacy(store.root, known_instance_names(instance))
     if not n:
         return []
     return [f"{_plural(n, 'legacy record folder')} under {store.root} — run `sndeck migrate`"]
@@ -174,7 +186,7 @@ def reconcile_and_report(client, store: Store) -> list[str]:
     except Exception:
         pass
     try:
-        lines.extend(_legacy_line(store))
+        lines.extend(_legacy_line(store, client.instance.name))
     except Exception:
         pass
     return lines

@@ -11,14 +11,15 @@ from dataclasses import asdict
 from datetime import date
 
 from .auth import AuthExpiredError, TokenProvider
-from .config import instance_names, load_instance
+from .config import known_instance_names, load_instance
 from .gc import apply_gc, plan_for, reconcile_and_report
-from .migrate import ClientLookups, apply_migration, find_legacy, plan_migration
+from .migrate import (ClientLookups, apply_migration, destination, destination_clashes,
+                      destinations, find_legacy, plan_migration, summarize_roots)
 from .push import push_all
 from .records import default_kind, pull, retarget
 from .refresh import apply_refresh, missing_outcome
 from .rest import TableClient
-from .snapshot import read_meta
+from .snapshot import DamagedRecordError, read_meta
 from .settings import load_sndeck_config, resolve_instance, resolve_store_root
 from .store import EDIT, REF, Store, StoreInvariantError, check_store_root
 from .sync import is_dirty, local_field_changes
@@ -102,7 +103,7 @@ def cmd_pull(client, store, table, sys_id, *, ref: bool, edit: bool,
     try:
         o = pull(client, store, table, sys_id, kind=kind, target_set=target,
                  overwrite_local=overwrite_local)
-    except (LookupError, StoreInvariantError) as e:
+    except (LookupError, StoreInvariantError, DamagedRecordError) as e:
         return _fail(str(e), as_json=as_json)
     files = sorted(p.name for p in o.path.iterdir()
                    if p.is_file() and p.name not in ("record.json", ".snapshot.json"))
@@ -142,7 +143,7 @@ def cmd_retarget(client, store, table, sys_id, set_id, *, as_json: bool) -> int:
     target = {"sys_id": meta.sys_id, "name": meta.name}
     try:
         path = retarget(store, client.instance.name, table, sys_id, target)
-    except LookupError as e:
+    except (LookupError, DamagedRecordError) as e:
         return _fail(str(e), as_json=as_json)
     _emit(f"{table}/{sys_id} now pushes to '{meta.name}' ({meta.sys_id})",
           {"folder": str(path), "target_set": target}, as_json)
@@ -327,20 +328,43 @@ def cmd_gc(client, store, *, apply: bool, attic_older_than: int | None, as_json:
     return 0
 
 
+def _migrate_line(r: dict) -> str:
+    target = ""
+    if r["target_set"] is not None:
+        target = f"  → {r['target_set']['name']} ({r['target_set']['sys_id']})"
+    return f"{r['action']:<6} {r['instance']}  {r['path']}{target}  — {r['reason']}"
+
+
 def cmd_migrate(store, clients, *, apply: bool, as_json: bool) -> int:
     """Convert legacy per-task folders under the store root into the store. `clients` are
-    only read (GET); without `apply` nothing on disk changes."""
+    only read (GET); without `apply` nothing on disk changes. The dry run runs the same
+    destination clash check as `--apply`."""
     names = [c.instance.name for c in clients]
     steps = plan_migration(find_legacy(store.root, names), ClientLookups(clients))
-    rows = [{"action": s.action, "path": str(s.copy.path), "instance": s.instance,
-             "target_set": s.target_set, "reason": s.reason} for s in steps]
     if not apply:
+        today = date.today()
+        clashes = destination_clashes(destinations(steps, store, today), store)
+        rows = []
+        for s in steps:
+            dest = destination(s, store, today)
+            rows.append({"action": s.action, "path": str(s.copy.path), "instance": s.instance,
+                         "target_set": s.target_set, "reason": s.reason,
+                         "dest": None if dest is None else str(dest),
+                         "clash": dest is not None and dest in clashes})
         if as_json:
             print(json.dumps(rows))
-        else:
-            for r in rows:
-                print(f"{r['action']:<6} {r['instance']}  {r['path']}  — {r['reason']}")
-            print(f"dry run: {len(rows)} legacy folders — re-run with --apply")
+            return 0
+        for r in rows:
+            print(_migrate_line(r))
+        for t in summarize_roots(steps, store.root):
+            line = f"{t.name}: store {t.store} · attic {t.attic} · drop {t.drop}"
+            if t.left:
+                line += f" · left in place: {', '.join(t.left)}"
+            print(line)
+        if clashes:
+            print("--apply would refuse: destinations already exist or are shared: "
+                  + ", ".join(str(c) for c in clashes))
+        print(f"dry run: {len(rows)} legacy folders — re-run with --apply")
         return 0
     try:
         report = apply_migration(steps, store, date.today())
@@ -438,10 +462,7 @@ def dispatch(argv: list[str], *, client_factory=None) -> int:
         root, source = os.path.expanduser(args.scratch), "--scratch"
     else:
         root, source = resolve_store_root([], os.environ, cfg)
-    try:
-        names = instance_names()
-    except FileNotFoundError:
-        names = [name]
+    names = known_instance_names(name)
     problem = check_store_root(root, names)
     aj = getattr(args, "as_json", False)
     if problem:
@@ -450,9 +471,8 @@ def dispatch(argv: list[str], *, client_factory=None) -> int:
     make = client_factory if client_factory else _make_client
     try:
         if args.cmd == "migrate":
-            known = names if name in names else names + [name]
-            order = ([n for n in known if default_kind(n) == EDIT]
-                     + [n for n in known if default_kind(n) != EDIT])
+            order = ([n for n in names if default_kind(n) == EDIT]
+                     + [n for n in names if default_kind(n) != EDIT])
             print(f"sndeck: migrate reads instances {', '.join(order)}", file=sys.stderr)
             return cmd_migrate(store, [make(n) for n in order], apply=args.apply, as_json=aj)
         client = make(name)
@@ -479,6 +499,6 @@ def dispatch(argv: list[str], *, client_factory=None) -> int:
         if args.cmd == "gc":
             return cmd_gc(client, store, apply=args.apply,
                           attic_older_than=args.attic_older_than, as_json=aj)
-    except (AuthExpiredError, StoreInvariantError) as e:
+    except (AuthExpiredError, StoreInvariantError, DamagedRecordError) as e:
         return _fail(str(e), as_json=aj)
     return 2

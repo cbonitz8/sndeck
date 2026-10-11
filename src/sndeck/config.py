@@ -44,6 +44,16 @@ def instance_names(*, config_path: str | None = None) -> list[str]:
     return [inst["name"] for inst in data["instances"]]
 
 
+def known_instance_names(current: str) -> list[str]:
+    """The registry's instance names with `current` appended when it is missing; just
+    `current` when there is no registry file."""
+    try:
+        names = instance_names()
+    except FileNotFoundError:
+        return [current]
+    return names if current in names else names + [current]
+
+
 @dataclass(frozen=True)
 class Instance:
     name: str

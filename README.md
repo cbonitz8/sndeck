@@ -20,7 +20,7 @@ sndeck requires `watchfiles>=0.21` for live file-watching of the store root — 
 sndeck [store_root]   # or: python -m sndeck [store_root]
 ```
 
-The optional `store_root` positional argument sets the **store root** sndeck keeps pulled records in. There is one copy of each record per instance: `<root>/<instance>/<table>/<name>__<sysId>/` for edit copies, `<root>/<instance>/_ref/…` for read-only reference copies, and `<root>/<instance>/_attic/<date>/…` for edits `gc` set aside. If omitted, the precedence order below applies. sndeck refuses a root that is really a legacy per-task or per-set folder; run `sndeck migrate` to convert one.
+The optional `store_root` positional argument sets the **store root** sndeck keeps pulled records in. There is one copy of each record per instance: `<root>/<instance>/<table>/<name>__<sysId>/` for edit copies, `<root>/<instance>/_ref/…` for read-only reference copies, and `<root>/<instance>/_attic/<date>/…` for edits `gc` set aside. If omitted, the precedence order below applies. sndeck refuses a root that is really a legacy per-task or per-set folder; run `sndeck migrate` to convert one. It also refuses any folder inside the default `~/.sn-scratch` (such as a task folder left after `migrate`): use `~/.sn-scratch` itself.
 
 Keys: `enter` open · `P` push · `s` switch set · `a` add set · `o` browser · `p` pull ·
 `r` refresh · `t` theme · `?` legend · `q` quit.
@@ -57,7 +57,9 @@ pushed (`pull --edit` / `--ref` override the default). `retarget` repoints an ed
 Push refuses, before writing anything, a ref copy, a legacy copy (run `migrate`), a missing
 or malformed target set, a target set that is not in progress or has no application scope,
 and a copy that belongs to a different instance. After a push the copy is re-baselined from
-the live record. `status` groups edit copies by target set, with a "no target set" group for
+the live record when every pushed field reads back as sent. If the instance did not take a
+pushed field (a field ACL, or a before business rule that rewrote it), the local files are
+kept, the copy stays dirty, and push warns naming the field. `status` groups edit copies by target set, with a "no target set" group for
 copies that need a `retarget`.
 
 **`gc` — cleaning the store.** `status`, `us ls` and TUI start also run the *auto* part of `gc`: an edit copy
@@ -67,13 +69,24 @@ copy with a real unpushed edit into `_attic/<date>/` with a `local.diff`, and de
 reference copies older than 14 days. `--attic-older-than N` (N ≥ 1) also deletes attic day
 folders older than N days; today's is never deleted. A copy with no target set, or whose set
 cannot be found, is kept with a warning, and a copy whose `.snapshot.json` is unreadable counts
-as dirty.
+as dirty. A shipped copy whose folder holds a file sndeck did not write (anything besides
+`record.json`, `.snapshot.json` and its code-field files, e.g. `script.js.bak` or an agent's
+draft) is never deleted as clean: it waits for `gc --apply`, which moves it to the attic.
+`--attic-older-than` covers `<root>/<instance>/_attic/` only; the root-level `_attic/`
+(migrated copies whose instance could not be resolved) is cleaned by hand.
 
 **`migrate` — one-time conversion.** Converts the old per-task, per-set folders into the
 store. It is a dry run without `--apply`, always reads set and record state from dev whatever
-`--instance` says, and checks every destination before moving anything (a failed apply rolls
-back). It never creates an edit copy on a non-dev instance: there a clean legacy copy is
-dropped and a dirty one goes to the attic.
+`--instance` says, and checks every destination before moving anything. The dry run prints
+one line per legacy copy (a `store` line names its target set and sys_id), a summary per old
+task folder (store / attic / drop counts and the files left in place), and any destination
+clash that would make `--apply` refuse. Rollback covers the copy phase: no legacy folder is
+deleted until every copy has been written; a failure after that point is not rolled back.
+It never creates an edit copy on a non-dev instance: there a clean legacy copy is dropped
+and a dirty one goes to the attic. A copy that would be dropped but holds a file sndeck did
+not write goes to the attic instead. After the copies, it removes only the set and table
+folders the migrated copies leave empty; the task folders themselves, their notes,
+`set-map.json` and any other folder you made stay in place.
 
 **`refresh` — clearing "phantom dirty".** A record is *dirty* purely when its local field
 files differ from its frozen `.snapshot.json` baseline. If a record's local files end up

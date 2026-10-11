@@ -691,7 +691,7 @@ def test_migrate_apply_moves_legacy_copy_into_store(tmp_path, capsys, sn_client)
     meta = json.loads((tmp_path / "dev" / "sys_script" / "A__111" / "record.json")
                       .read_text())["_meta"]
     assert meta["instance"] == "dev" and meta["target_set"] == {"sys_id": set_id, "name": "Rel"}
-    assert not (tmp_path / "task").exists()
+    assert (tmp_path / "task").is_dir() and not any((tmp_path / "task").iterdir())
 
 
 def test_dispatch_migrate_dry_run_on_empty_store(capsys):
@@ -841,3 +841,44 @@ def test_dispatch_migrate_apply_reaches_cmd_migrate(monkeypatch):
     cli.dispatch(["migrate", "--apply", "--json"],
                  client_factory=lambda n: _client(_routes_current_set))
     assert seen["kwargs"] == {"apply": True, "as_json": True}
+
+
+def test_migrate_dry_run_shows_target_set_root_summary_and_clashes(tmp_path, capsys, sn_client):
+    set_id = sid("b")
+    make_legacy(tmp_path / "task" / f"Rel__{set_id}", "sys_script", "A", "111")
+    (tmp_path / "task" / "notes.md").write_text("n")
+    rc = cli.cmd_migrate(Store(tmp_path), [sn_client(_legacy_routes(set_id))],
+                         apply=False, as_json=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    store_line = next(line for line in out.splitlines() if line.startswith("store"))
+    assert "Rel" in store_line and set_id in store_line
+    assert "task: store 1 · attic 0 · drop 0" in out
+    assert "notes.md" in out
+    assert "clash" not in out
+
+    make_copy(tmp_path, "dev", "sys_script", "A", "111")
+    before = _tree(tmp_path)
+    cli.cmd_migrate(Store(tmp_path), [sn_client(_legacy_routes(set_id))],
+                    apply=False, as_json=False)
+    out = capsys.readouterr().out
+    assert "--apply would refuse" in out
+    assert str(tmp_path / "dev" / "sys_script" / "A__111") in out
+    assert _tree(tmp_path) == before
+
+
+def test_pull_onto_damaged_copy_reports_damage_not_missing(tmp_path, capsys, sn_client):
+    f = make_copy(tmp_path, "dev", "sys_script", "A", "111", dirty=True)
+    doc = json.loads((f / "record.json").read_text())
+    del doc["_meta"]["target_set"]
+    (f / "record.json").write_text(json.dumps(doc))
+
+    def routes(table, params):
+        if table == "sys_script":
+            return [{"sys_id": "111", "name": "A", "script": "live"}]
+        return _routes_current_set(table, params)
+    rc = cli.cmd_pull(sn_client(routes), Store(tmp_path), "sys_script", "111",
+                      ref=False, edit=False, overwrite_local=False, as_json=False)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"damaged record.json at {f / 'record.json'}: missing target_set" in err

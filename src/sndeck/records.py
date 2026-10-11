@@ -82,6 +82,8 @@ def pull(client, store: Store, table: str, sys_id: str, *, kind: str,
             dirty = {c.field for c in snapshot.field_changes(folder)}
             blocked = sorted(dirty & set(plan_refresh(folder, fields).local_diverged))
             if blocked and not overwrite_local:
+                if "target_set" not in extra:
+                    raise snapshot.missing_key(folder, "target_set")
                 return PullOutcome(
                     "refused", table, sys_id, name, kind, folder, extra["target_set"],
                     reason=(f"unpushed local edits on {blocked} differ from the instance — "

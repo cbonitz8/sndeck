@@ -191,3 +191,23 @@ def test_reconcile_and_report_auto_deletes_only_clean_shipped_copies(tmp_path, s
     assert not clean.exists()
     assert dirty.exists() and expired.exists()
     assert any("Clean" in line and "removed" in line for line in lines)
+
+
+def test_shipped_copy_with_user_files_is_c3_never_auto_deleted(tmp_path):
+    clean = make_copy(tmp_path, "dev", "sys_script", "A", "111", target_set=SET_B)
+    (clean / "script.js.bak").write_text("old")
+    live_eq = make_copy(tmp_path, "dev", "sys_script", "B", "222", target_set=SET_B,
+                        dirty=True)
+    (live_eq / "draft.js").write_text("agent draft")
+    s = Store(tmp_path)
+    acts = plan_gc(s, "dev", {SET_B["sys_id"]: "complete"},
+                   _live("gs.info('x'); // EDITED"), NOW)
+    by_name = {a.path.name: a for a in acts}
+    assert by_name["A__111"].cls == "C3" and "script.js.bak" in by_name["A__111"].detail
+    assert by_name["B__222"].cls == "C3" and "draft.js" in by_name["B__222"].detail
+    assert apply_gc(acts, s, "dev", date(2026, 10, 20), auto=True) == []
+    assert clean.exists() and live_eq.exists()
+    apply_gc(acts, s, "dev", date(2026, 10, 20), auto=False)
+    day = tmp_path / "dev" / "_attic" / "2026-10-20" / "sys_script"
+    assert (day / "A__111" / "script.js.bak").read_text() == "old"
+    assert (day / "B__222" / "draft.js").read_text() == "agent draft"

@@ -8,6 +8,8 @@ all three shapes plus the one definition of "dirty":
   - .snapshot.json  ``{**fields}`` — the frozen baseline a local edit is diffed against.
   - <field><ext>    one file per code field — the editable surface.
 
+`expected_files` names exactly these; anything else in a record folder is the user's.
+
 `scratch.py` owns *where* a record folder lives (naming, enumeration); this owns
 *what* is inside it. Before this module existed the snapshot read/write, the
 record.json body shape, the field->filename rule, and the dirty predicate were
@@ -44,6 +46,42 @@ def instance_fields(record: dict) -> dict:
     Matches exactly what a pull writes to .snapshot.json (SN adds `_meta`-style
     underscore keys we never persist)."""
     return {k: v for k, v in record.items() if not k.startswith("_")}
+
+
+class DamagedRecordError(Exception):
+    """A record.json lacks a key its copy must have. Deliberately not a LookupError, so a
+    damaged copy is never reported as a record that is not there."""
+
+
+def missing_key(record_path, key: str) -> DamagedRecordError:
+    """The error for a record.json in `record_path` that lacks `key`."""
+    return DamagedRecordError(
+        f"damaged record.json at {Path(record_path) / RECORD_JSON}: missing {key}")
+
+
+def read_meta_doc(record_path) -> dict:
+    """The `_meta` dict of a folder's record.json; DamagedRecordError when it has none."""
+    doc = json.loads((Path(record_path) / RECORD_JSON).read_text())
+    if "_meta" not in doc:
+        raise missing_key(record_path, "_meta")
+    return doc["_meta"]
+
+
+def expected_files(table: str) -> frozenset[str]:
+    """Every name a record folder of `table` is expected to hold: record.json, the
+    snapshot, and one file per registry code field. Anything else is the user's."""
+    art = CODE_ARTIFACTS.get(table)
+    fields = art.script_fields if art else ()
+    return frozenset({RECORD_JSON, SNAPSHOT_JSON, *(field_file(f) for f in fields)})
+
+
+def unexpected_files(record_path) -> list[str]:
+    """Names in a record folder outside expected_files, sorted. Deleting the folder as
+    clean would destroy them."""
+    record_path = Path(record_path)
+    table, _, _ = read_meta(record_path)
+    allowed = expected_files(table)
+    return sorted(p.name for p in record_path.iterdir() if p.name not in allowed)
 
 
 def read_meta(record_path) -> tuple[str, str, str]:
@@ -88,7 +126,7 @@ def write_record_json(record_path, table: str, sys_id: str, name: str, fields: d
 
 def read_meta_extra(record_path) -> dict:
     """The store keys (instance, kind, target_set) present in a folder's _meta."""
-    meta = json.loads((Path(record_path) / RECORD_JSON).read_text())["_meta"]
+    meta = read_meta_doc(record_path)
     return {k: meta[k] for k in META_EXTRA_KEYS if k in meta}
 
 
@@ -96,6 +134,8 @@ def write_meta_extra(record_path, **updates) -> None:
     """Update store keys in _meta in place; fields and pulled_at are untouched."""
     p = Path(record_path) / RECORD_JSON
     doc = json.loads(p.read_text())
+    if "_meta" not in doc:
+        raise missing_key(record_path, "_meta")
     for k, v in updates.items():
         if k not in META_EXTRA_KEYS:
             raise KeyError(f"{k!r} is not a store meta key")
