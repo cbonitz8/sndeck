@@ -12,18 +12,20 @@ confirm-gated writes (switch current set, push local edits).
 python -m pip install -e '.[dev]'   # or in a venv
 ```
 
-sndeck requires `watchfiles>=0.21` for live file-watching of the scratch directory — it's declared as a runtime dependency in `pyproject.toml` and installed automatically with the above command.
+sndeck requires `watchfiles>=0.21` for live file-watching of the store root — it's declared as a runtime dependency in `pyproject.toml` and installed automatically with the above command.
 
 ## Run
 
 ```
-sndeck [scratch_dir]   # or: python -m sndeck [scratch_dir]
+sndeck [store_root]   # or: python -m sndeck [store_root]
 ```
 
-The optional `scratch_dir` positional argument sets the **root** directory sndeck uses for pulled records; sndeck creates one workspace subdir per update set within it (`<root>/<set-name>__<setSysId>/…`). If omitted, the precedence order below applies.
+The optional `store_root` positional argument sets the **store root** sndeck keeps pulled records in. There is one copy of each record per instance: `<root>/<instance>/<table>/<name>__<sysId>/` for edit copies, `<root>/<instance>/_ref/…` for read-only reference copies, and `<root>/<instance>/_attic/<date>/…` for edits `gc` set aside. If omitted, the precedence order below applies. sndeck refuses a root that is really a legacy per-task or per-set folder; run `sndeck migrate` to convert one.
 
 Keys: `enter` open · `P` push · `s` switch set · `a` add set · `o` browser · `p` pull ·
 `r` refresh · `t` theme · `?` legend · `q` quit.
+
+In the TUI, `p` pulls follow the same default as the CLI (edit copies on dev, reference copies elsewhere), and a refused pull shows as a warning.
 
 ## Writes
 
@@ -39,32 +41,55 @@ to any subcommand for machine-readable output.
 
 ```
 sndeck us get|ls|set <id>     # show / list / switch the current update set
-sndeck pull <table> <id>      # download a record into the current set's workspace
-sndeck status                 # the current set's staging area (clean/dirty/local-only)
+sndeck pull <table> <id>      # download a record's one local copy (--edit / --ref; default by instance)
+sndeck retarget <table> <id>  # point an edit copy at another update set (--set <id>, default: current)
+sndeck status                 # edit copies grouped by target set (clean/dirty/local-only)
 sndeck push <table> <id>      # push one staged record   (push --all for all dirty)
 sndeck refresh <table> <id>   # rebase a record's snapshot from the instance
+sndeck gc [--apply]           # clean the store; dry run without --apply
+sndeck migrate [--apply]      # convert legacy per-task folders into the store
 ```
 
-The normal loop is **pull → edit → push**. `status`/`ls` also run a best-effort prune:
-a set's workspace is deleted once the set leaves *in progress* and every record in it is
-clean.
+The normal loop is **pull → edit → push**. On dev, `pull` makes an *edit copy* that
+remembers its **target update set**; push captures into that set, not into whichever set is
+current. On any other instance `pull` makes a read-only *reference copy*, which is never
+pushed (`pull --edit` / `--ref` override the default). `retarget` repoints an edit copy.
+Push refuses, before writing anything, a ref copy, a legacy copy (run `migrate`), a missing
+or malformed target set, a target set that is not in progress or has no application scope,
+and a copy that belongs to a different instance. After a push the copy is re-baselined from
+the live record. `status` groups edit copies by target set, with a "no target set" group for
+copies that need a `retarget`.
+
+**`gc` — cleaning the store.** `status`/`ls` also run the *auto* part of `gc`: an edit copy
+whose target set has shipped (complete/ignore) is deleted when it is clean or every edit is
+already live. `sndeck gc` is a dry run that lists the rest; `--apply` also moves a shipped
+copy with a real unpushed edit into `_attic/<date>/` with a `local.diff`, and deletes
+reference copies older than 14 days. `--attic-older-than N` (N ≥ 1) also deletes attic day
+folders older than N days; today's is never deleted. A copy with no target set, or whose set
+cannot be found, is kept with a warning, and a copy whose `.snapshot.json` is unreadable counts
+as dirty.
+
+**`migrate` — one-time conversion.** Converts the old per-task, per-set folders into the
+store. It is a dry run without `--apply`, always reads set and record state from dev whatever
+`--instance` says, and checks every destination before moving anything (a failed apply rolls
+back). It never creates an edit copy on a non-dev instance: there a clean legacy copy is
+dropped and a dirty one goes to the attic.
 
 **`refresh` — clearing "phantom dirty".** A record is *dirty* purely when its local field
 files differ from its frozen `.snapshot.json` baseline. If a record's local files end up
 matching the instance while the snapshot does not — e.g. it was pushed via a *different*
 update set, or its set was marked complete before the push — the folder stays dirty
-forever: prune keeps it (warning `⚠ set '…' is complete but has unpushed edits — not
-pruned`), and it can't be re-pulled because pull needs the set to be current and a
-complete set won't stay current. `refresh` is the way out — it re-reads the live record
-and rebases that folder's `.snapshot.json` **regardless of the enclosing set's state and
+forever: `gc` keeps it (it is never one of the auto classes), and it can't be re-pulled
+because a re-pull refuses to overwrite an unpushed edit. `refresh` is the way out — it re-reads the live record
+and rebases that copy's `.snapshot.json` **regardless of the target set's state and
 without needing it to be current**. Once the snapshot matches, the record goes clean and
-prune reaps it on the next `status`. Use this instead of hand-editing `.snapshot.json` or
+`gc` reaps it on the next `status`. Use this instead of hand-editing `.snapshot.json` or
 deleting the folder by hand.
 
-- `sndeck refresh <table> <id>` — snapshot-only. Finds the folder(s) by scanning every
-  workspace for a matching `record.json`; rebases the snapshot. This is also the fix for
+- `sndeck refresh <table> <id>` — snapshot-only. Finds the instance's edit copy and
+  rebases its snapshot. This is also the fix for
   push's `instance changed since pull … — refresh first` clobber-guard error.
-- `sndeck refresh --all` — do it for every record in every on-disk workspace (best-effort;
+- `sndeck refresh --all` — do it for every edit copy on the instance (best-effort;
   skips-and-reports anything it can't safely resolve).
 - `--overwrite-local` — if the local files genuinely diverge from the instance, a
   snapshot-only rebase is *refused* (it would leave the record dirty and retire the drift
@@ -79,7 +104,7 @@ sndeck reads a TOML config file on startup. All keys are optional.
 
 ```toml
 # ~/.config/sndeck/config.toml
-scratch_dir = "~/.sn-scratch"      # scratch ROOT; sndeck creates one workspace subdir per update set within it
+scratch_dir = "~/.sn-scratch"      # store root; copies live under <root>/<instance>/…
 instance    = "dev"                # ServiceNow instance name
 theme       = "dark"               # "dark" (Macchiato) or "light" (Latte); default dark
 ```
@@ -92,11 +117,11 @@ sndeck ships two Catppuccin themes — **Macchiato** (dark, default) and **Latte
 
 ### Precedence
 
-**Scratch dir** (highest → lowest):
-1. CLI positional arg: `sndeck /path/to/scratch`
-2. `SNDECK_SCRATCH` env var — the cockpit launcher sets this per task, keeping each cockpit isolated
+**Store root** (highest → lowest):
+1. CLI positional arg: `sndeck /path/to/store`
+2. `SNDECK_SCRATCH` env var
 3. `scratch_dir` in `~/.config/sndeck/config.toml`
-4. Current working directory
+4. `~/.sn-scratch`
 
 **Instance** (highest → lowest):
 1. `SNDECK_INSTANCE` env var
@@ -108,7 +133,7 @@ sndeck ships two Catppuccin themes — **Macchiato** (dark, default) and **Latte
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `SNDECK_INSTANCE` | `dev` | Instance name in the happy-platform-mcp config |
-| `SNDECK_SCRATCH` | cwd | Scratch dir holding pulled record folders |
+| `SNDECK_SCRATCH` | `~/.sn-scratch` | Store root holding pulled record folders |
 | `SNDECK_CONFIG` | `~/.config/sndeck/config.toml` | Path to the sndeck config file |
 | `SNDECK_THEME` | `dark` | `"dark"` (Macchiato) or `"light"` (Latte) |
 | `SNDECK_STATE` | `~/.config/sndeck/state.json` | Tracked sets and split pane ratio |
@@ -129,5 +154,8 @@ The `sn-cockpit.sh` launcher opens an sndeck monitor pane when run with `SNDECK=
 ```
 SNDECK=1 sn-cockpit.sh <task-label>
 ```
+
+The cockpit task folder holds notes only; sndeck always uses the store root, so every
+cockpit shares one copy of each record.
 
 [happy-platform-mcp]: https://www.npmjs.com/package/happy-platform-mcp

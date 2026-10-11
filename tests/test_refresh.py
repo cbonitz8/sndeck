@@ -38,34 +38,6 @@ def _set_dir(root, slug, sysid):
     return d
 
 
-# ---------------------------------------------------------------- discovery
-
-def test_find_record_folders_across_workspaces_no_current_set(tmp_path):
-    """The record lives in a complete set's workspace; find it with no current-set
-    pointer, from a DIFFERENT set's workspace too."""
-    sid = "a" * 32
-    ws1 = _set_dir(tmp_path, "shipped", "1" + HEX[1:])
-    ws2 = _set_dir(tmp_path, "other", "2" + HEX[1:])
-    f1 = _make_record(ws1, "sys_script", "Rec", sid, local={"script": "v"}, snapshot={"script": "v"})
-    f2 = _make_record(ws2, "sys_script", "Rec", sid, local={"script": "v"}, snapshot={"script": "v"})
-    found = refresh.find_record_folders(tmp_path, "sys_script", sid)
-    assert set(found) == {f1, f2}
-
-
-def test_find_record_folders_none(tmp_path):
-    ws = _set_dir(tmp_path, "s", "1" + HEX[1:])
-    _make_record(ws, "sys_script", "Rec", "a" * 32, local={"script": "v"}, snapshot={"script": "v"})
-    assert refresh.find_record_folders(tmp_path, "sys_script", "b" * 32) == []
-
-
-def test_all_record_folders_covers_workspaces_and_orphans(tmp_path):
-    ws = _set_dir(tmp_path, "s", "1" + HEX[1:])
-    a = _make_record(ws, "sys_script", "A", "a" * 32, local={"script": "x"}, snapshot={"script": "x"})
-    # legacy flat-root orphan: <root>/<table>/<folder>
-    b = _make_record(tmp_path, "sys_script", "B", "b" * 32, local={"script": "y"}, snapshot={"script": "y"})
-    assert set(refresh.all_record_folders(tmp_path)) == {a, b}
-
-
 # ---------------------------------------------------------------- planner
 
 def test_plan_flags_stale_snapshot_but_matching_local(tmp_path):

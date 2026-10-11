@@ -2,14 +2,15 @@ import json
 from pathlib import Path
 from sndeck import sync
 from sndeck.registry import field_extension
+from storekit import make_copy
 
 
 def _make_record(tmp_path, table, fields, snapshot):
-    """Create a scratch record folder: record.json, .snapshot.json, extracted field files."""
-    folder = tmp_path / table / f"rec__{'a'*32}"
-    folder.mkdir(parents=True)
+    """A store edit copy whose snapshot and extracted field files are set explicitly."""
+    folder = make_copy(tmp_path, "dev", table, "Rec", "a" * 32)
+    (folder / "script.js").unlink()
     (folder / "record.json").write_text(json.dumps(
-        {"_meta": {"table": table, "sys_id": "a"*32, "name": "Rec"}, **snapshot}))
+        {"_meta": json.loads((folder / "record.json").read_text())["_meta"], **snapshot}))
     (folder / ".snapshot.json").write_text(json.dumps(snapshot))
     for f, val in fields.items():
         (folder / f"{f}{field_extension(f)}").write_text(val)

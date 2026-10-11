@@ -5,7 +5,7 @@ from sndeck import tree
 from sndeck.store import Store
 from storekit import make_copy
 
-# Canonical fake sys_ids: 32 lowercase hex chars (required by scan_workspace regex)
+# Canonical fake sys_ids: 32 lowercase hex chars
 _SET1 = "1" * 32
 _SET2 = "2" * 32
 _SET_WS = "e" * 32

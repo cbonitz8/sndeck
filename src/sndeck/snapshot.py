@@ -157,7 +157,7 @@ def field_changes(record_path) -> list[FieldChange]:
 
 def is_dirty(record_path) -> bool:
     """True when the record has an unpushed local edit. The one predicate every
-    caller (staging pane, push, prune, refresh) shares."""
+    caller (staging pane, push, gc, refresh) shares."""
     try:
         return bool(field_changes(record_path))
     except (FileNotFoundError, json.JSONDecodeError):

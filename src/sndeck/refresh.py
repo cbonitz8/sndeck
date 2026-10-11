@@ -6,8 +6,7 @@ refresh first" error: that error tells the user to refresh, but until now there 
 no way to do it. A scratch folder whose local field files match the instance while
 its frozen snapshot does not (e.g. the record was pushed via a *different* set, or the
 enclosing set was marked complete before the push) stays "phantom dirty" forever —
-prune keeps warning and can never reap it, because pull requires the target set to be
-the current set and a complete set will not stay current.
+gc keeps treating it as dirty and can never retire it.
 
 Design (see module tests): snapshot-only by default. Rewriting only the snapshot
 resolves the already-pushed case to clean (local == instance == new snapshot → not
@@ -18,7 +17,7 @@ would clobber the instance), so we refuse unless --overwrite-local is passed, wh
 replaces the local field files with the instance copy (discarding the local edit).
 
 Pure/disk-only core: the planner and writer take an already-fetched instance record
-dict, so they are network-free and testable exactly like sync/prune's planners. The
+dict, so they are network-free and testable exactly like sync's planner. The
 CLI owns the single client.get_record call.
 """
 from __future__ import annotations
@@ -29,44 +28,6 @@ from pathlib import Path
 from .registry import CODE_ARTIFACTS
 from . import snapshot
 from .snapshot import _norm, field_file, instance_fields as _instance_fields
-from .scratch import orphans, set_workspaces
-
-
-def find_record_folders(root, table: str, sys_id: str) -> list[Path]:
-    """Every on-disk record folder whose _meta matches (table, sys_id), across ALL
-    set workspaces plus legacy flat-root orphans — with no current-set requirement.
-    Pure/disk-only; order-stable and de-duplicated by path."""
-    out: list[Path] = []
-    for ws in set_workspaces(root):
-        for ref in ws.records:
-            if ref.table == table and ref.sys_id == sys_id:
-                out.append(ref.path)
-    for ref in orphans(root):
-        if ref.table == table and ref.sys_id == sys_id:
-            out.append(ref.path)
-    seen: set[Path] = set()
-    uniq: list[Path] = []
-    for p in out:
-        if p not in seen:
-            seen.add(p)
-            uniq.append(p)
-    return uniq
-
-
-def all_record_folders(root) -> list[Path]:
-    """Every on-disk record folder in every set workspace plus legacy orphans.
-    Backs `refresh --all`. Pure/disk-only, de-duplicated by path."""
-    out: list[Path] = []
-    for ws in set_workspaces(root):
-        out.extend(ref.path for ref in ws.records)
-    out.extend(ref.path for ref in orphans(root))
-    seen: set[Path] = set()
-    uniq: list[Path] = []
-    for p in out:
-        if p not in seen:
-            seen.add(p)
-            uniq.append(p)
-    return uniq
 
 
 @dataclass(frozen=True)

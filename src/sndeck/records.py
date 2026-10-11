@@ -1,8 +1,5 @@
-"""Pull SN records (all columns) to disk as folders; scan them back.
-
-The on-disk scratch layout itself (folder naming, set-dir/record enumeration)
-is owned by .scratch — this module re-exports those names for existing
-importers and focuses on the network->disk pull."""
+"""Pull SN records (all columns) into the store: the network->disk side of the one-copy
+layout, whose paths and enumeration are owned by .store."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,33 +8,8 @@ from pathlib import Path
 from .refresh import plan_refresh
 from .registry import CODE_ARTIFACTS
 from . import snapshot
-from .snapshot import RECORD_JSON, SNAPSHOT_JSON, is_dirty
-from .scratch import (_SET_DIR, RecordRef, WorkspaceRef,
-                      folder_name as _folder_name, set_dir_name, set_workspace,
-                      scan_scratch, scan_workspace, delete_record_folders)
+from .snapshot import is_dirty
 from .store import EDIT, REF, Store
-
-
-def pull_record(client, table: str, sys_id: str, scratch_dir) -> RecordRef:
-    """SN read → local write. Never writes to ServiceNow."""
-    rec = client.get_record(table, sys_id, display_value="false")
-    if rec is None:
-        raise LookupError(f"{table}/{sys_id} not found")
-    name = rec.get("name") or rec.get("sys_name") or sys_id
-    folder = Path(scratch_dir) / table / _folder_name(name, sys_id)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    fields = snapshot.instance_fields(rec)
-    snapshot.write_record_json(folder, table, sys_id, name, fields)
-    snapshot.write_snapshot(folder, fields)
-
-    artifact = CODE_ARTIFACTS.get(table)
-    if artifact:
-        for f in artifact.script_fields:
-            if f in fields and fields[f] not in (None, ""):
-                (folder / snapshot.field_file(f)).write_text(str(fields[f]), encoding="utf-8")
-
-    return RecordRef(table, sys_id, name, folder)
 
 
 def default_kind(instance: str) -> str:
@@ -167,29 +139,6 @@ def pull_set_into_store(client, store: Store, set_sys_id: str, set_name: str, *,
     return StorePullSummary(pulled, refused, skipped)
 
 
-@dataclass(frozen=True)
-class PullSummary:
-    pulled: int
-    skipped: int
-
-
-def pull_set(client, scratch_dir, set_sys_id: str, set_name: str) -> PullSummary:
-    """Materialize a whole update set: fetch its records and pull each into the set's
-    workspace, counting LookupError skips (deleted/missing on the instance). The 'pull a
-    set' domain op the TUI's _pull and _pull_sets both hand-rolled from raw primitives."""
-    from .updatesets import update_set_records
-    ws = set_workspace(scratch_dir, set_sys_id, set_name)
-    _total, recs = update_set_records(client, set_sys_id)
-    pulled = skipped = 0
-    for table, sys_id in recs:
-        try:
-            pull_record(client, table, sys_id, ws)
-            pulled += 1
-        except LookupError:
-            skipped += 1
-    return PullSummary(pulled, skipped)
-
-
 def dirty_files_from_disk(store: Store, instance: str) -> list:
     """Every dirty edit copy for `instance` — the staging set, read from disk alone.
     Sorted by (table, name). Feeds the staging pane and push-all so newly pulled
@@ -200,10 +149,3 @@ def dirty_files_from_disk(store: Store, instance: str) -> list:
            for c in store.iter_copies(instance, EDIT) if is_dirty(c.path)]
     out.sort(key=lambda f: (f.table, f.name))
     return out
-
-
-def folders_for_records(scratch_dir, records) -> list[Path]:
-    """Existing scratch folders for the given (table, sys_id) pairs."""
-    wanted = {(t, s) for t, s in records}
-    return [ref.path for ref in scan_scratch(scratch_dir)
-            if (ref.table, ref.sys_id) in wanted]

@@ -19,7 +19,7 @@ def hermetic_home(tmp_path_factory, monkeypatch):
     """Point HOME, the sndeck config, state and scratch at a throwaway dir, and refuse
     any recursive delete under the real scratch/config roots. dispatch() and the TUI
     resolve scratch from ~/.config/sndeck/config.toml, and a fake client's partial
-    update-set response made prune reap real workspaces."""
+    update-set response made a delete reap real copies."""
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SNDECK_CONFIG", str(home / "sndeck-config.toml"))

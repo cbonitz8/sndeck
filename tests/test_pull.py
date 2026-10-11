@@ -42,6 +42,18 @@ def test_first_pull_creates_edit_copy(tmp_path, sn_client):
     assert (o.path / "script.js").read_text() == "a"
 
 
+def test_ng_template_pull_extracts_template_html_and_edit_is_a_change(tmp_path, sn_client):
+    from sndeck.sync import local_field_changes
+    rec = {"sys_id": "ng1", "name": "sp-hero", "template": "<div>hi</div>"}
+    o = pull(_client(sn_client, rec), Store(tmp_path), "sp_ng_template", "ng1",
+             kind=EDIT, target_set=SET_A)
+    tpl = o.path / "template.html"
+    assert tpl.read_text() == "<div>hi</div>"
+    assert local_field_changes(o.path) == []
+    tpl.write_text("<div>edited</div>")
+    assert [c.field for c in local_field_changes(o.path)] == ["template"]
+
+
 def test_clean_repull_refreshes_and_keeps_target(tmp_path, sn_client):
     s = Store(tmp_path)
     pull(_client(sn_client, {"sys_id": "111", "name": "A", "script": "a"}), s,
